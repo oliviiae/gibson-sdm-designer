@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Real/personal sequence data - not published by default.
+# Remove specific lines below if you want a file included in the repo.
+KM2eAL.fasta
+test.fasta
