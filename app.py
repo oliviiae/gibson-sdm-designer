@@ -383,9 +383,15 @@ else:
     from_aa = col1.text_input("From", value="K", max_chars=1).upper()
     to_aa = col2.text_input("To", value="E", max_chars=1).upper()
 
+    # Streamlit buttons only return True on the single rerun right after
+    # they're clicked. The scan results (and the "show design" button below)
+    # need to survive later reruns triggered by the selectbox/button
+    # interactions that follow, so they're persisted in session_state rather
+    # than being recomputed and re-gated behind `if st.button("Scan sequence")`.
     if st.button("Scan sequence", type="primary") and from_aa and to_aa:
         hits = find_all_positions(sequence, int(orf_start), from_aa)
         if not hits:
+            st.session_state["scan_results"] = None
             st.warning(f"No {from_aa} residues found in this reading frame.")
         else:
             progress = st.progress(0, text=f"Checking {len(hits)} candidate position(s)…")
@@ -408,33 +414,40 @@ else:
                     working.append((pos_1, codon, note))
                 progress.progress((i + 1) / len(hits))
             progress.empty()
+            st.session_state["scan_results"] = {
+                "from_aa": from_aa, "to_aa": to_aa,
+                "hits": len(hits), "working": working, "failing": failing,
+            }
 
-            st.markdown(
-                f'<div class="section-label">{len(working)} of {len(hits)} '
-                f'position(s) designable</div>', unsafe_allow_html=True,
+    scan = st.session_state.get("scan_results")
+    if scan and scan["from_aa"] == from_aa and scan["to_aa"] == to_aa:
+        working, failing = scan["working"], scan["failing"]
+        st.markdown(
+            f'<div class="section-label">{len(working)} of {scan["hits"]} '
+            f'position(s) designable</div>', unsafe_allow_html=True,
+        )
+        if working:
+            st.dataframe(
+                {"Position": [f"{from_aa}{p}{to_aa}" for p, _, _ in working],
+                 "Codon": [c for _, c, _ in working],
+                 "Note": [n for _, _, n in working]},
+                hide_index=True,
+                use_container_width=True,
             )
-            if working:
-                st.dataframe(
-                    {"Position": [f"{from_aa}{p}{to_aa}" for p, _, _ in working],
-                     "Codon": [c for _, c, _ in working],
-                     "Note": [n for _, _, n in working]},
-                    hide_index=True,
-                    use_container_width=True,
-                )
-                picked = st.selectbox(
-                    "View full design for a position",
-                    [f"{from_aa}{p}{to_aa}" for p, _, _ in working],
-                )
-                if picked and st.button("Show design"):
-                    orig_aa, position, new_aa = parse_mutation_label(picked)
-                    with st.spinner("Designing…"):
-                        result = design_mutation_primers(
-                            sequence, position, orig_aa, new_aa,
-                            orf_start=int(orf_start),
-                            tm_range=(tm_min, tm_max),
-                            window_bp=(int(win_near), int(win_far)),
-                        )
-                    _render_result(result, key_prefix="find_")
-            if failing:
-                with st.expander(f"{len(failing)} position(s) not designable"):
-                    st.write(", ".join(f"{from_aa}{p}{to_aa}" for p, _ in failing))
+            picked = st.selectbox(
+                "View full design for a position",
+                [f"{from_aa}{p}{to_aa}" for p, _, _ in working],
+            )
+            if picked and st.button("Show design"):
+                orig_aa, position, new_aa = parse_mutation_label(picked)
+                with st.spinner("Designing…"):
+                    result = design_mutation_primers(
+                        sequence, position, orig_aa, new_aa,
+                        orf_start=int(orf_start),
+                        tm_range=(tm_min, tm_max),
+                        window_bp=(int(win_near), int(win_far)),
+                    )
+                _render_result(result, key_prefix="find_")
+        if failing:
+            with st.expander(f"{len(failing)} position(s) not designable"):
+                st.write(", ".join(f"{from_aa}{p}{to_aa}" for p, _ in failing))
