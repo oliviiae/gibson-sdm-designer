@@ -1,5 +1,5 @@
 """
-Streamlit web app for Gibson SDM primer design.
+Web app for Gibson SDM primer design.
 
 Run locally:
     streamlit run app.py
@@ -18,11 +18,98 @@ from Bio.Seq import Seq
 from pipeline import design_mutation_primers, find_all_positions, parse_mutation_label
 from primer_ad import NEB_CATALOG
 
-st.set_page_config(page_title="Gibson SDM Primer Designer", layout="wide")
+st.set_page_config(page_title="Gibson SDM Primer Design", layout="wide")
 
 
 # ---------------------------------------------------------------------------
-# Helpers (mirrors sdm_design.py's CLI logic, adapted for Streamlit widgets)
+# Styling
+# ---------------------------------------------------------------------------
+
+st.markdown("""
+<style>
+  html, body, [class*="css"] {
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+  }
+  #MainMenu, footer, header { visibility: hidden; }
+
+  .app-title {
+    font-size: 1.65rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: #1a2530;
+    margin-bottom: 0.15rem;
+  }
+  .app-subtitle {
+    font-size: 0.92rem;
+    color: #667380;
+    margin-bottom: 1.6rem;
+  }
+  .section-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #8a97a3;
+    margin: 1.1rem 0 0.35rem 0;
+  }
+  .result-card {
+    border: 1px solid #e3e7eb;
+    border-radius: 8px;
+    padding: 1.1rem 1.3rem;
+    margin-bottom: 1rem;
+    background: #fbfcfd;
+  }
+  .kv-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.28rem 0;
+    border-bottom: 1px solid #eef1f3;
+    font-size: 0.88rem;
+  }
+  .kv-row:last-child { border-bottom: none; }
+  .kv-label { color: #667380; }
+  .kv-value { color: #1a2530; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .kv-value code { background: #eef1f3; padding: 0.1rem 0.35rem; border-radius: 4px; }
+
+  .badge {
+    display: inline-block;
+    padding: 0.18rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .badge-pass { background: #e4f3ea; color: #1e6b3c; }
+  .badge-fail { background: #fbe7e7; color: #a33232; }
+  .badge-skip { background: #f0f1f3; color: #6b7480; }
+
+  .verify-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid #eef1f3;
+  }
+  .verify-row:last-child { border-bottom: none; }
+  .verify-label { font-size: 0.88rem; color: #3a444d; }
+
+  div.stButton > button, div.stDownloadButton > button {
+    background: #1a2530;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-weight: 500;
+  }
+  div.stButton > button:hover, div.stDownloadButton > button:hover {
+    background: #2c3946;
+    color: white;
+  }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _read_fasta_text(text: str) -> str | None:
@@ -63,7 +150,6 @@ def _find_orf_candidates(sequence: str, top_n: int = 8, min_aa: int = 20):
         pos = atg + 1
     orfs.sort(key=lambda t: -t[1])
     if not orfs:
-        # fall back to any ATG at all
         pos = 0
         while True:
             atg = sequence.find("ATG", pos)
@@ -88,27 +174,43 @@ def _neb_tag(enzyme: str | None) -> str:
     info = NEB_CATALOG.get(enzyme)
     if not info:
         return ""
-    if info.get("hf"):
-        tag = f"NEB {info['hf']} (HF)"
-    else:
-        tag = f"NEB {info['cat']}"
+    tag = f"NEB {info['hf']} (HF)" if info.get("hf") else f"NEB {info['cat']}"
     if info.get("note"):
-        tag += f"  ⚠ {info['note']}"
+        tag += f" — {info['note']}"
     return tag
 
 
+def _badge(passed) -> str:
+    if passed is True:
+        return '<span class="badge badge-pass">PASS</span>'
+    if passed is False:
+        return '<span class="badge badge-fail">FAIL</span>'
+    return '<span class="badge badge-skip">SKIPPED</span>'
+
+
 # ---------------------------------------------------------------------------
-# Sidebar: sequence input (shared across both modes)
+# Header
 # ---------------------------------------------------------------------------
 
-st.title("🧬 Gibson SDM Primer Designer")
-st.caption("Design Gibson site-directed mutagenesis primers from a FASTA sequence.")
+st.markdown('<div class="app-title">Gibson SDM Primer Design</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="app-subtitle">'
+    'Automated primer design for Gibson-assembly site-directed mutagenesis, '
+    'with restriction-site verification and NEB catalog lookup.'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# Sidebar: sequence input
+# ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.header("1. Sequence")
-    upload = st.file_uploader("Upload a FASTA file", type=["fasta", "fa", "txt"])
-    pasted = st.text_area("…or paste FASTA text", height=150,
-                           placeholder=">my_construct\nATGGCT...")
+    st.markdown('<div class="section-label">Sequence</div>', unsafe_allow_html=True)
+    upload = st.file_uploader("FASTA file", type=["fasta", "fa", "txt"], label_visibility="collapsed")
+    pasted = st.text_area("Or paste FASTA text", height=140,
+                           placeholder=">construct\nATGGCT...", label_visibility="collapsed")
 
     sequence = None
     if upload is not None:
@@ -117,17 +219,17 @@ with st.sidebar:
         sequence = _read_fasta_text(pasted)
 
     if sequence:
-        st.success(f"Loaded {len(sequence)} bp")
+        st.caption(f"{len(sequence):,} bp loaded")
 
-    st.header("2. ORF start")
+    st.markdown('<div class="section-label">Reading frame</div>', unsafe_allow_html=True)
     orf_start = None
     if sequence:
         candidates = _find_orf_candidates(sequence)
         if candidates:
-            labels = [f"nt {start}  ({length} aa){'  ◀ longest' if i == 0 else ''}"
+            labels = [f"nt {start}  ·  {length} aa{'  (longest)' if i == 0 else ''}"
                       for i, (start, length) in enumerate(candidates)]
             labels.append("Custom position…")
-            choice = st.selectbox("Pick the ORF start codon (ATG)", labels, index=0)
+            choice = st.selectbox("ORF start codon (ATG)", labels, index=0, label_visibility="collapsed")
             if choice == "Custom position…":
                 orf_start = st.number_input("Custom ORF start (0-based nt)",
                                              min_value=0, max_value=len(sequence) - 1, value=0)
@@ -135,26 +237,32 @@ with st.sidebar:
                 orf_start = candidates[labels.index(choice)][0]
         else:
             st.error("No ATG found in this sequence.")
+    else:
+        st.caption("Load a sequence first")
 
-    st.header("3. Design settings")
-    tm_min = st.number_input("Tm min (°C)", value=48.0, step=1.0)
-    tm_max = st.number_input("Tm max (°C)", value=54.0, step=1.0)
-    win_near = st.number_input("A/D window near (bp, per side)", value=350, step=50)
-    win_far = st.number_input("A/D window far (bp, per side)", value=500, step=50)
+    st.markdown('<div class="section-label">Parameters</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    tm_min = c1.number_input("Tm min (°C)", value=48.0, step=1.0)
+    tm_max = c2.number_input("Tm max (°C)", value=54.0, step=1.0)
+    c3, c4 = st.columns(2)
+    win_near = c3.number_input("Window near (bp)", value=350, step=50)
+    win_far = c4.number_input("Window far (bp)", value=500, step=50)
+    st.caption("A/D flanking search, applied per side")
 
 
 # ---------------------------------------------------------------------------
-# Main panel: two modes
+# Main panel
 # ---------------------------------------------------------------------------
 
 if not sequence or orf_start is None:
-    st.info("Upload or paste a FASTA sequence in the sidebar to get started.")
+    st.info("Load a FASTA sequence in the sidebar to begin.")
     st.stop()
 
-mode = st.radio("Mode", ["Design a specific mutation", "Find all positions for an AA change"],
-                 horizontal=True)
+mode = st.radio("Mode", ["Design a mutation", "Scan for designable positions"],
+                 horizontal=True, label_visibility="collapsed")
+st.write("")
 
-# ---------------------------------------------------------------------------
+
 def _render_result(result, key_prefix=""):
     if result.errors:
         for e in result.errors:
@@ -164,61 +272,78 @@ def _render_result(result, key_prefix=""):
     for w in result.warnings:
         st.warning(w)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Mutation", result.mutation_label)
-        st.write(f"Codon: `{result.original_codon}` → `{result.new_codon}`")
-        st.write(f"ORF start: nt {result.orf_start_detected} (0-based)")
-        st.write(f"Mutation site: nt {result.mutation_nt_position} (0-based)")
-    with col2:
-        if result.diagnostic:
-            d = result.diagnostic
-            src = "(from mutation)" if d.source == "mutation" else \
-                  (f"(silent mutation: aa{d.silent_aa_index} "
-                   f"{d.silent_original_codon}→{d.silent_new_codon})")
-            st.write(f"**Diagnostic site:** {d.enzyme} — {d.effect.upper()} {src}")
-        else:
-            st.write("**Diagnostic site:** none found")
+    kv = [
+        ("Mutation", result.mutation_label),
+        ("Codon change", f"<code>{result.original_codon}</code> → <code>{result.new_codon}</code>"),
+        ("ORF start", f"nt {result.orf_start_detected} (0-based)"),
+        ("Mutation site", f"nt {result.mutation_nt_position} (0-based)"),
+    ]
+    if result.diagnostic:
+        d = result.diagnostic
+        src = "from mutation" if d.source == "mutation" else \
+              (f"silent mutation at aa{d.silent_aa_index}, "
+               f"{d.silent_original_codon}→{d.silent_new_codon}")
+        kv.append(("Diagnostic site", f"{d.enzyme} — {d.effect} ({src})"))
+    else:
+        kv.append(("Diagnostic site", "none found"))
+    rows_html = "".join(
+        f'<div class="kv-row"><span class="kv-label">{label}</span>'
+        f'<span class="kv-value">{value}</span></div>'
+        for label, value in kv
+    )
+    st.markdown(f'<div class="result-card">{rows_html}</div>', unsafe_allow_html=True)
 
-    st.subheader("Primers (5'→3')")
+    st.markdown('<div class="section-label">Primers (5\' → 3\')</div>', unsafe_allow_html=True)
     rows = []
     if result.primer_A:
         pa = result.primer_A
         rows.append(["A", pa.sequence, f"{pa.tm:.0f}°C",
-                     f"{pa.enzyme} {_neb_tag(pa.enzyme)}  cut {pa.cut_pos}"])
+                     f"{pa.enzyme}  ·  {_neb_tag(pa.enzyme)}  ·  cut {pa.cut_pos}"])
     if result.primer_B:
         pb = result.primer_B
-        rows.append(["B", pb.sequence, f"{pb.tm:.0f}°C", "sense / forward"])
+        rows.append(["B", pb.sequence, f"{pb.tm:.0f}°C", "sense (forward)"])
     if result.primer_C:
         pc = result.primer_C
         rows.append(["C", pc.sequence,
                      f"{pc.tm:.0f}°C full / {pc.tm_anneal:.0f}°C anneal",
-                     "antisense / reverse"])
+                     "antisense (reverse)"])
     if result.primer_D:
         pd = result.primer_D
         rows.append(["D", pd.sequence, f"{pd.tm:.0f}°C",
-                     f"{pd.enzyme} {_neb_tag(pd.enzyme)}  cut {pd.cut_pos}"])
-    st.table(
+                     f"{pd.enzyme}  ·  {_neb_tag(pd.enzyme)}  ·  cut {pd.cut_pos}"])
+    st.dataframe(
         {"Primer": [r[0] for r in rows],
          "Sequence": [r[1] for r in rows],
          "Tm": [r[2] for r in rows],
-         "Notes": [r[3] for r in rows]}
+         "Notes": [r[3] for r in rows]},
+        hide_index=True,
+        use_container_width=True,
     )
 
-    st.write(f"**Overlap:** `{result.overlap_seq}` "
-             f"({len(result.overlap_seq)} bp, Tm={result.overlap_tm:.0f}°C)")
-
+    st.markdown('<div class="section-label">Overlap &amp; fragments</div>', unsafe_allow_html=True)
+    frag_html = (
+        f'<div class="kv-row"><span class="kv-label">Overlap sequence</span>'
+        f'<span class="kv-value"><code>{result.overlap_seq}</code> '
+        f'({len(result.overlap_seq)} bp, Tm={result.overlap_tm:.0f}°C)</span></div>'
+    )
     if result.frag_ad_bp:
-        st.write(f"**Fragments:** ab={result.frag_ab_bp} bp, "
-                 f"cd={result.frag_cd_bp} bp, assembled={result.frag_ad_bp} bp")
+        frag_html += (
+            f'<div class="kv-row"><span class="kv-label">Fragment sizes</span>'
+            f'<span class="kv-value">ab {result.frag_ab_bp} bp  ·  '
+            f'cd {result.frag_cd_bp} bp  ·  assembled {result.frag_ad_bp} bp</span></div>'
+        )
+    st.markdown(f'<div class="result-card">{frag_html}</div>', unsafe_allow_html=True)
 
-    st.subheader("Verification")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Translation", "PASS ✓" if result.translation_passed else "FAIL ✗")
-    c2.metric("Restriction site",
-              "PASS ✓" if result.restriction_passed else
-              ("SKIP" if result.restriction_passed is None else "FAIL ✗"))
-    c3.metric("Overall", "PASS ✓" if result.overall_passed else "FAIL ✗")
+    st.markdown('<div class="section-label">Verification</div>', unsafe_allow_html=True)
+    verify_html = (
+        f'<div class="verify-row"><span class="verify-label">Translation check</span>'
+        f'{_badge(result.translation_passed)}</div>'
+        f'<div class="verify-row"><span class="verify-label">Restriction site check</span>'
+        f'{_badge(result.restriction_passed)}</div>'
+        f'<div class="verify-row"><span class="verify-label"><strong>Overall</strong></span>'
+        f'{_badge(result.overall_passed)}</div>'
+    )
+    st.markdown(f'<div class="result-card">{verify_html}</div>', unsafe_allow_html=True)
 
     report_text = (
         f"Mutation: {result.mutation_label}\n"
@@ -228,14 +353,13 @@ def _render_result(result, key_prefix=""):
         + f"\n\nOverlap: {result.overlap_seq}\n"
         f"Overall: {'PASS' if result.overall_passed else 'FAIL'}\n"
     )
-    st.download_button("Download report (.txt)", report_text,
+    st.download_button("Download report", report_text,
                         file_name=f"{result.mutation_label}_report.txt",
                         key=f"{key_prefix}dl")
 
 
-if mode == "Design a specific mutation":
-    st.subheader("Design a specific mutation")
-    label = st.text_input("Mutation (e.g. K255E)", placeholder="K255E")
+if mode == "Design a mutation":
+    label = st.text_input("Mutation", placeholder="e.g. K255E", label_visibility="collapsed")
     if st.button("Design primers", type="primary") and label:
         try:
             orig_aa, position, new_aa = parse_mutation_label(label)
@@ -255,15 +379,14 @@ if mode == "Design a specific mutation":
             _render_result(result)
 
 else:
-    st.subheader("Find all designable positions for an amino-acid change")
-    col1, col2 = st.columns(2)
-    from_aa = col1.text_input("From (single-letter AA)", value="K", max_chars=1).upper()
-    to_aa = col2.text_input("To (single-letter AA)", value="E", max_chars=1).upper()
+    col1, col2, col3 = st.columns([1, 1, 3])
+    from_aa = col1.text_input("From", value="K", max_chars=1).upper()
+    to_aa = col2.text_input("To", value="E", max_chars=1).upper()
 
-    if st.button("Find positions", type="primary") and from_aa and to_aa:
+    if st.button("Scan sequence", type="primary") and from_aa and to_aa:
         hits = find_all_positions(sequence, int(orf_start), from_aa)
         if not hits:
-            st.warning(f"No {from_aa} residues found in this ORF.")
+            st.warning(f"No {from_aa} residues found in this reading frame.")
         else:
             progress = st.progress(0, text=f"Checking {len(hits)} candidate position(s)…")
             working, failing = [], []
@@ -286,18 +409,23 @@ else:
                 progress.progress((i + 1) / len(hits))
             progress.empty()
 
-            st.success(f"{len(working)} of {len(hits)} position(s) designable")
+            st.markdown(
+                f'<div class="section-label">{len(working)} of {len(hits)} '
+                f'position(s) designable</div>', unsafe_allow_html=True,
+            )
             if working:
-                st.table({
-                    "Position": [f"{from_aa}{p}{to_aa}" for p, _, _ in working],
-                    "Codon": [c for _, c, _ in working],
-                    "Note": [n for _, _, n in working],
-                })
+                st.dataframe(
+                    {"Position": [f"{from_aa}{p}{to_aa}" for p, _, _ in working],
+                     "Codon": [c for _, c, _ in working],
+                     "Note": [n for _, _, n in working]},
+                    hide_index=True,
+                    use_container_width=True,
+                )
                 picked = st.selectbox(
-                    "Pick a position to see the full design",
+                    "View full design for a position",
                     [f"{from_aa}{p}{to_aa}" for p, _, _ in working],
                 )
-                if picked and st.button("Show full design for selected position"):
+                if picked and st.button("Show design"):
                     orig_aa, position, new_aa = parse_mutation_label(picked)
                     with st.spinner("Designing…"):
                         result = design_mutation_primers(
@@ -308,5 +436,5 @@ else:
                         )
                     _render_result(result, key_prefix="find_")
             if failing:
-                with st.expander(f"{len(failing)} position(s) filtered out"):
+                with st.expander(f"{len(failing)} position(s) not designable"):
                     st.write(", ".join(f"{from_aa}{p}{to_aa}" for p, _ in failing))
