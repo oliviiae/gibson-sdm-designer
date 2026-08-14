@@ -310,6 +310,39 @@ def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     return out
 
 
+def _render_seq_with_cuts(seq: str, frag_start: int, cuts: list[tuple[int | None, str | None]]):
+    """
+    Render seq (monospace) with each restriction enzyme's cut site
+    highlighted in place. cuts: list of (cut_pos_1based_in_full_construct,
+    enzyme_name) — mirrors the CLI's cut-site marking exactly.
+    """
+    marked = seq
+    labels = []
+    for cut_pos, enzyme in cuts:
+        if cut_pos is None:
+            continue
+        rel = (cut_pos - 1) - frag_start
+        if 0 <= rel < len(seq):
+            labels.append((rel, enzyme))
+    for rel, enzyme in sorted(labels, key=lambda x: -x[0]):
+        marked = (
+            marked[:rel]
+            + f'<span style="background:#fde8e8;color:#a33232;font-weight:700;">{marked[rel]}</span>'
+            + marked[rel + 1:]
+        )
+    st.markdown(
+        f'<div style="font-family:monospace;font-size:0.85rem;word-break:break-all;'
+        f'background:#F5F8F8;padding:0.6rem;border-radius:6px;">{marked}</div>',
+        unsafe_allow_html=True,
+    )
+    if labels:
+        st.caption(
+            "Cut site(s): " + ", ".join(
+                f"{enzyme} at nt {rel} in this fragment" for rel, enzyme in sorted(labels)
+            )
+        )
+
+
 def _render_mutated_region(result, aa_flank: int = 15):
     """Show the mutated ORF's DNA + protein for a window around the
     mutation(s), with the changed codon(s)/residue(s) bracketed."""
@@ -443,13 +476,27 @@ def _render_result(result, key_prefix=""):
     st.markdown(f'<div class="result-card">{frag_html}</div>', unsafe_allow_html=True)
 
     if result.frag_ad_bp:
-        with st.expander("Show PCR product sequences"):
+        with st.expander("Show PCR product sequences (cut sites marked)"):
+            pa, pd = result.primer_A, result.primer_D
+            cd_start = result.bc_result.overlap_start if result.bc_result else 0
+
             st.caption(f"Fragment ab — {result.frag_ab_bp} bp (primer A → overlap end)")
-            st.code(result.frag_ab_seq, language=None)
+            _render_seq_with_cuts(
+                result.frag_ab_seq, pa.start if pa else 0,
+                [(pa.cut_pos, pa.enzyme)] if pa else [],
+            )
             st.caption(f"Fragment cd — {result.frag_cd_bp} bp (overlap start → primer D)")
-            st.code(result.frag_cd_seq, language=None)
+            _render_seq_with_cuts(
+                result.frag_cd_seq, cd_start,
+                [(pd.cut_pos, pd.enzyme)] if pd else [],
+            )
             st.caption(f"Assembled product — {result.frag_ad_bp} bp")
-            st.code(result.frag_ad_seq, language=None)
+            assembled_cuts = []
+            if pa:
+                assembled_cuts.append((pa.cut_pos, pa.enzyme))
+            if pd:
+                assembled_cuts.append((pd.cut_pos, pd.enzyme))
+            _render_seq_with_cuts(result.frag_ad_seq, pa.start if pa else 0, assembled_cuts)
 
     st.markdown('<div class="section-label">Verification</div>', unsafe_allow_html=True)
     verify_html = (
