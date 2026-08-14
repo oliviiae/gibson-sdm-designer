@@ -23,7 +23,7 @@ from Bio.Seq import Seq
 from codon_utils import find_codon_and_mutate
 from primer_bc import design_bc_primers, PrimerBCResult
 from primer_ad import design_ad_primers, FlankingPrimerResult, PREFERRED_ENZYMES
-from restriction_utils import gained_lost_sites, find_silent_restriction_sites
+from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites
 from assembly import (
     assemble_product,
     translate_orf,
@@ -355,13 +355,32 @@ def design_mutation_primers(
         diagnostic: DiagnosticInfo | None = None
         working_seq = mutated_seq   # may be updated by silent mutation below
 
-        if gained:
-            enz = next(iter(gained))
+        # A "gained"/"lost" enzyme is only a clean, useful diagnostic if it
+        # doesn't ALSO cut somewhere else unrelated to the mutation — otherwise
+        # a digest cuts either way and the presence/absence check verified in
+        # Part 6 is meaningless (e.g. an enzyme with 4 sites total, one of
+        # which happens to be destroyed by the mutation, still visibly cuts
+        # the construct 3 other times regardless of the mutation).
+        before_sites = scan_sites(sequence)
+        after_sites  = scan_sites(mutated_seq)
+        clean_gained = [
+            enz for enz in gained
+            if len(before_sites.get(enz, [])) == 0
+            and len(after_sites.get(enz, [])) == len(gained[enz])
+        ]
+        clean_lost = [
+            enz for enz in lost
+            if len(after_sites.get(enz, [])) == 0
+            and len(before_sites.get(enz, [])) == len(lost[enz])
+        ]
+
+        if clean_gained:
+            enz = clean_gained[0]
             diagnostic = DiagnosticInfo(
                 enzyme=enz, effect="gained", source="mutation"
             )
-        elif lost:
-            enz = next(iter(lost))
+        elif clean_lost:
+            enz = clean_lost[0]
             diagnostic = DiagnosticInfo(
                 enzyme=enz, effect="lost", source="mutation"
             )
@@ -389,7 +408,34 @@ def design_mutation_primers(
                 flank = min(max(flank, 1) * 3, max_silent_search_flank)
 
             if silent_hits:
+                # Same uniqueness concern as the direct-mutation diagnostic
+                # above: a candidate enzyme found via the local-window search
+                # could still have other pre-existing sites elsewhere in the
+                # full construct, making it a useless gained/lost signal on a
+                # real digest. Prefer the first candidate (already sorted by
+                # fewest nt changes) that is globally clean; fall back to the
+                # raw first candidate if none are — Part 6 verification will
+                # still catch and flag it as a FAIL rather than a false PASS.
                 hit = silent_hits[0]
+                for candidate in silent_hits:
+                    cand_seq = _silent_mutation_seq(
+                        mutated_seq, candidate["position"], candidate["new_codon"]
+                    )
+                    cand_after = scan_sites(cand_seq)
+                    enz = candidate["enzyme"]
+                    if candidate["effect"] == "gained":
+                        clean = (
+                            len(after_sites.get(enz, [])) == 0
+                            and len(cand_after.get(enz, [])) == len(candidate["site_positions"])
+                        )
+                    else:  # "lost"
+                        clean = (
+                            len(cand_after.get(enz, [])) == 0
+                            and len(after_sites.get(enz, [])) == len(candidate["site_positions"])
+                        )
+                    if clean:
+                        hit = candidate
+                        break
                 diagnostic = DiagnosticInfo(
                     enzyme=hit["enzyme"],
                     effect=hit["effect"],
