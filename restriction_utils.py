@@ -59,6 +59,25 @@ def scan_sites(seq: str) -> dict[str, list[int]]:
     return {str(enz): positions for enz, positions in raw.items() if positions}
 
 
+_ENZYME_BY_NAME = {str(e): e for e in _BATCH}
+
+
+def count_sites(seq: str, enzyme_name: str) -> list[int]:
+    """
+    Cut positions for a SINGLE named enzyme only (1-based). Much cheaper
+    than scan_sites() when only one enzyme's count is actually needed —
+    scan_sites analyzes the whole ~50-80 enzyme batch every call, which
+    gets expensive when called repeatedly (e.g. once per candidate while
+    searching for a globally-unique diagnostic site).
+    """
+    enz = _ENZYME_BY_NAME.get(enzyme_name)
+    if enz is None:
+        return []
+    analysis = Analysis(RestrictionBatch([enz]), Seq(seq), linear=True)
+    raw = analysis.full()
+    return raw.get(enz, [])
+
+
 def gained_lost_sites(
     seq_before: str,
     seq_after: str,

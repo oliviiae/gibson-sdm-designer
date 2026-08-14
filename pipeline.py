@@ -23,7 +23,7 @@ from Bio.Seq import Seq
 from codon_utils import find_codon_and_mutate, ranked_codon_options, apply_codon
 from primer_bc import design_bc_primers, PrimerBCResult
 from primer_ad import design_ad_primers, FlankingPrimerResult, PREFERRED_ENZYMES
-from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites
+from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites, count_sites
 from assembly import (
     assemble_product,
     translate_orf,
@@ -529,6 +529,29 @@ def design_mutation_primers(
             searched_flank = flank
             span_start = min(codon_abs_list)
             span_end   = max(c + 3 for c in codon_abs_list)
+
+            def _clean_candidate(candidate: dict) -> bool:
+                # Same uniqueness concern as the direct-mutation diagnostic
+                # above: a candidate enzyme found via the local-window search
+                # could still have other pre-existing sites elsewhere in the
+                # full construct, making it a useless gained/lost signal on a
+                # real digest. Uses count_sites (single enzyme) rather than
+                # scan_sites (all ~50-80 enzymes) — this runs once per
+                # candidate at every widen step, so scanning the whole batch
+                # each time made widened searches extremely slow.
+                enz = candidate["enzyme"]
+                cand_seq = _silent_mutation_seq(
+                    mutated_seq, candidate["position"], candidate["new_codon"]
+                )
+                cand_count = len(count_sites(cand_seq, enz))
+                enz_before = len(after_sites.get(enz, []))
+                if candidate["effect"] == "gained":
+                    return enz_before == 0 and cand_count == len(candidate["site_positions"])
+                else:  # "lost"
+                    return cand_count == 0 and enz_before == len(candidate["site_positions"])
+
+            clean_hit = None
+            best_unclean_hit = None  # best-effort fallback if nothing clean turns up
             while flank <= max_silent_search_flank:
                 near = span_start - flank
                 far  = span_end + flank
@@ -536,7 +559,13 @@ def design_mutation_primers(
                     mutated_seq, orf_start, max(0, near), min(len(mutated_seq), far)
                 )
                 searched_flank = flank
-                if silent_hits:
+                if silent_hits and best_unclean_hit is None:
+                    best_unclean_hit = silent_hits[0]
+                for candidate in silent_hits:
+                    if _clean_candidate(candidate):
+                        clean_hit = candidate
+                        break
+                if clean_hit is not None:
                     break
                 if flank >= max_silent_search_flank:
                     break
@@ -544,35 +573,8 @@ def design_mutation_primers(
                 # starts at 0 (0 * 3 == 0 forever).
                 flank = min(max(flank, 1) * 3, max_silent_search_flank)
 
-            if silent_hits:
-                # Same uniqueness concern as the direct-mutation diagnostic
-                # above: a candidate enzyme found via the local-window search
-                # could still have other pre-existing sites elsewhere in the
-                # full construct, making it a useless gained/lost signal on a
-                # real digest. Prefer the first candidate (already sorted by
-                # fewest nt changes) that is globally clean; fall back to the
-                # raw first candidate if none are — Part 6 verification will
-                # still catch and flag it as a FAIL rather than a false PASS.
-                hit = silent_hits[0]
-                for candidate in silent_hits:
-                    cand_seq = _silent_mutation_seq(
-                        mutated_seq, candidate["position"], candidate["new_codon"]
-                    )
-                    cand_after = scan_sites(cand_seq)
-                    enz = candidate["enzyme"]
-                    if candidate["effect"] == "gained":
-                        clean = (
-                            len(after_sites.get(enz, [])) == 0
-                            and len(cand_after.get(enz, [])) == len(candidate["site_positions"])
-                        )
-                    else:  # "lost"
-                        clean = (
-                            len(cand_after.get(enz, [])) == 0
-                            and len(after_sites.get(enz, [])) == len(candidate["site_positions"])
-                        )
-                    if clean:
-                        hit = candidate
-                        break
+            hit = clean_hit or best_unclean_hit
+            if hit is not None:
                 diagnostic = DiagnosticInfo(
                     enzyme=hit["enzyme"],
                     effect=hit["effect"],
@@ -590,6 +592,15 @@ def design_mutation_primers(
                         f"Diagnostic site required widening the silent-mutation "
                         f"search to ±{searched_flank} nt (default ±{silent_window_flank} nt) "
                         f"to find {hit['enzyme']}."
+                    )
+                if clean_hit is None:
+                    result.warnings.append(
+                        f"No diagnostic enzyme within ±{searched_flank} nt was confirmed "
+                        f"globally unique in the construct — {hit['enzyme']} was used as "
+                        f"the best available option, but it may cut elsewhere unrelated "
+                        f"to this mutation, making a simple digest unreliable as a "
+                        f"pass/fail screen. Consider verifying by sequencing instead, or "
+                        f"widen the search further."
                     )
             else:
                 result.warnings.append(
