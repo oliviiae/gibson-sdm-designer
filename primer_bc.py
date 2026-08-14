@@ -205,6 +205,19 @@ def design_bc_primers(
         tm_range=tm_range,
     )
 
+    # c_end was walked independently, before the overlap was known. If the
+    # overlap ends up extending as far as (or past) c_end — which a larger
+    # min_overlap makes more likely — primer C would have zero unique
+    # annealing bases beyond the shared overlap: it wouldn't actually bind
+    # fresh template at all, and couldn't function as a real primer. Treat
+    # that the same as any other unsatisfiable design, not a silent Tm=0.
+    if ov_end >= c_end:
+        raise RuntimeError(
+            f"Overlap end (position {ov_end}) reached or passed primer C's "
+            f"end (position {c_end}), leaving no unique annealing region for "
+            f"primer C. Try a smaller --min-overlap."
+        )
+
     # --- Step 4: build primer sequences --------------------------------------
     primer_b     = mutated_seq[b_start:ov_end]          # forward, sense
     primer_c_fwd = mutated_seq[ov_start:c_end]           # template region

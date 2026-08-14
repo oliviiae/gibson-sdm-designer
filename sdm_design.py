@@ -98,6 +98,13 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Minimum Tm (°C) for primer design. Default: 48.")
     p.add_argument("--tm-max", type=float, default=54.0,
                    help="Maximum Tm (°C) for primer design. Default: 54.")
+    p.add_argument("--min-overlap", type=int, default=16,
+                   help="Minimum B/C overlap length in bp. Default: 16 "
+                        "(the protocol's stated minimum — do not go below "
+                        "this). Raising it does not fix a low primer-C "
+                        "annealing Tm warning and can make it worse; it's "
+                        "mainly useful if you want a longer/stronger overlap "
+                        "for its own sake.")
     p.add_argument("--json", action="store_true",
                    help="Output results as JSON.")
     p.add_argument("--all-candidates", action="store_true",
@@ -511,6 +518,7 @@ def main(argv: list[str] | None = None):
                 orf_start=orf,
                 tm_range=(args.tm_min, args.tm_max),
                 window_bp=tuple(args.window),
+                min_overlap=args.min_overlap,
             )
             if r.errors:
                 failing.append((pos_1, codon, r.errors[0]))
@@ -561,6 +569,7 @@ def main(argv: list[str] | None = None):
                     orf_start=orf,
                     tm_range=(args.tm_min, args.tm_max),
                     window_bp=tuple(args.window),
+                    min_overlap=args.min_overlap,
                     max_silent_search_flank=500,
                 )
                 if (not r2.errors
@@ -643,6 +652,7 @@ def main(argv: list[str] | None = None):
         orf_start=args.orf_start,
         tm_range=(args.tm_min, args.tm_max),
         window_bp=tuple(args.window),
+        min_overlap=args.min_overlap,
     )
 
     real_stdout = sys.stdout

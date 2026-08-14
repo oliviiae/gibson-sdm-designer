@@ -533,6 +533,48 @@ def design_mutation_primers(
             end=bc.c_end,
         )
 
+        # Primer B's start is fixed while the overlap's start can shift a few
+        # bases later to satisfy the G/C-terminus + Tm-range constraints
+        # together — when that happens, B ends up longer than the overlap
+        # alone and its own Tm can run above the target range. The overlap
+        # itself is still separately verified in range; this is just a
+        # heads-up that primer B as a whole runs hot.
+        tm_lo, tm_hi = tm_range
+        if bc.tm_b > tm_hi:
+            result.warnings.append(
+                f"Primer B's full Tm ({bc.tm_b:.0f}°C) runs above the target "
+                f"{tm_lo:.0f}-{tm_hi:.0f}°C range because it had to extend a few "
+                f"bases past the overlap to reach a valid G/C-terminated overlap "
+                f"start. The overlap itself (Tm={bc.tm_overlap_fwd:.0f}°C) is "
+                f"still in range — this only affects primer B's own annealing Tm."
+            )
+
+        # Primer C's Tm is walked over [overlap + annealing tail] combined, so
+        # the annealing-only portion (the part that actually binds fresh
+        # template each cycle) can land well outside 48-54°C as a byproduct,
+        # even though the combined walk landed in range. A low anneal Tm is a
+        # real practical concern (weak/nonspecific priming), so flag it.
+        if bc.tm_c_anneal < tm_lo:
+            result.warnings.append(
+                f"Primer C's unique annealing region (excluding the shared "
+                f"overlap) has Tm {bc.tm_c_anneal:.0f}°C, below the target "
+                f"{tm_lo:.0f}-{tm_hi:.0f}°C range. This is the portion that "
+                f"actually binds fresh template each PCR cycle — a low Tm here "
+                f"risks weak or nonspecific priming for the 'cd' fragment. "
+                f"This is a side effect of where primer C's endpoint landed "
+                f"relative to the overlap for this specific sequence, not "
+                f"something --min-overlap can reliably fix (raising it can "
+                f"make this worse; lowering it below 16nt would violate the "
+                f"minimum overlap length). Consider a lower annealing "
+                f"temperature or gradient PCR for the 'cd' fragment."
+            )
+        elif bc.tm_c_anneal > tm_hi:
+            result.warnings.append(
+                f"Primer C's unique annealing region (excluding the shared "
+                f"overlap) has Tm {bc.tm_c_anneal:.0f}°C, above the target "
+                f"{tm_lo:.0f}-{tm_hi:.0f}°C range."
+            )
+
         # ── Part 5: A/D primers ───────────────────────────────────────────────
         # If no unique flanking site is found, widen the search window
         # outward and retry (no sequence changes — just looking further away)
