@@ -33,6 +33,44 @@ def _changed_positions(original: str, mutated: str) -> list[int]:
     return [i for i, (a, b) in enumerate(zip(original, mutated)) if a != b]
 
 
+def ranked_codon_options(original_codon: str, new_aa: str) -> list[str]:
+    """
+    All codons encoding new_aa that differ from original_codon, ranked by
+    fewest nucleotide changes first (ties broken alphabetically for
+    determinism). The first element is what find_codon_and_mutate uses.
+
+    Exposed publicly so callers can try alternate codons for the SAME target
+    amino acid — per protocol step 1a: "change the nucleotide again" is the
+    first fallback when the minimal-change codon doesn't yield a usable
+    diagnostic site, tried before resorting to an adjacent silent mutation.
+    """
+    candidates = _codons_for_aa(new_aa)
+    candidates = [c for c in candidates if c != original_codon.upper()]
+    return sorted(candidates, key=lambda c: (_hamming(original_codon, c), c))
+
+
+def apply_codon(
+    dna_seq: str,
+    orf_start: int,
+    aa_position: int,
+    specific_codon: str,
+) -> tuple[str, list[int], str, str]:
+    """
+    Like find_codon_and_mutate, but swaps in a caller-chosen codon instead of
+    auto-picking the fewest-change one. Used to try alternate synonymous
+    codon options for the same target amino acid.
+    """
+    dna_seq = dna_seq.upper()
+    codon_start = orf_start + (aa_position - 1) * 3
+    original_codon = dna_seq[codon_start: codon_start + 3]
+    specific_codon = specific_codon.upper()
+
+    changes = _changed_positions(original_codon, specific_codon)
+    abs_positions = [codon_start + i for i in changes]
+    mutated_seq = dna_seq[:codon_start] + specific_codon + dna_seq[codon_start + 3:]
+    return mutated_seq, abs_positions, original_codon, specific_codon
+
+
 def find_codon_and_mutate(
     dna_seq: str,
     orf_start: int,

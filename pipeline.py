@@ -20,7 +20,7 @@ from typing import Any
 
 from Bio.Seq import Seq
 
-from codon_utils import find_codon_and_mutate
+from codon_utils import find_codon_and_mutate, ranked_codon_options, apply_codon
 from primer_bc import design_bc_primers, PrimerBCResult
 from primer_ad import design_ad_primers, FlankingPrimerResult, PREFERRED_ENZYMES
 from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites
@@ -385,6 +385,50 @@ def design_mutation_primers(
                 enzyme=enz, effect="lost", source="mutation"
             )
         else:
+            # Protocol step 1a: "change the nucleotide again" — before
+            # resorting to an adjacent-codon silent mutation, try OTHER
+            # codons that still encode the same target amino acid (there is
+            # often more than one, and the fewest-change pick above isn't
+            # necessarily the one that creates/destroys a usable site).
+            for alt_codon in ranked_codon_options(orig_codon, new_aa):
+                alt_seq, alt_changed_pos, _, _ = apply_codon(
+                    sequence, orf_start, target_position, alt_codon
+                )
+                alt_diff = gained_lost_sites(sequence, alt_seq)
+                alt_after = scan_sites(alt_seq)
+                alt_clean_gained = [
+                    enz for enz in alt_diff["gained"]
+                    if len(before_sites.get(enz, [])) == 0
+                    and len(alt_after.get(enz, [])) == len(alt_diff["gained"][enz])
+                ]
+                alt_clean_lost = [
+                    enz for enz in alt_diff["lost"]
+                    if len(alt_after.get(enz, [])) == 0
+                    and len(before_sites.get(enz, [])) == len(alt_diff["lost"][enz])
+                ]
+                if alt_clean_gained or alt_clean_lost:
+                    mutated_seq, changed_pos, new_codon = alt_seq, alt_changed_pos, alt_codon
+                    working_seq = mutated_seq
+                    after_sites = alt_after
+                    result.new_codon = new_codon
+                    result.changed_positions = changed_pos
+                    result.mutation_nt_position = changed_pos[0] if changed_pos else codon_abs
+                    if alt_clean_gained:
+                        diagnostic = DiagnosticInfo(
+                            enzyme=alt_clean_gained[0], effect="gained", source="mutation"
+                        )
+                    else:
+                        diagnostic = DiagnosticInfo(
+                            enzyme=alt_clean_lost[0], effect="lost", source="mutation"
+                        )
+                    result.warnings.append(
+                        f"Used alternate codon {new_codon} for {new_aa} (instead of "
+                        f"the fewest-change option) to obtain a clean diagnostic "
+                        f"site ({diagnostic.enzyme})."
+                    )
+                    break
+
+        if diagnostic is None:
             # Search for a silent mutation, widening the window outward from
             # the mutation codon until a hit is found or the cap is reached.
             # Capped (default 150 nt each side ≈ 50 codons) so the diagnostic
