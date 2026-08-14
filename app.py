@@ -310,11 +310,16 @@ def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     return out
 
 
-def _render_seq_with_cuts(seq: str, frag_start: int, cuts: list[tuple[int | None, str | None]]):
+def _render_seq_with_cuts(
+    seq: str, frag_start: int, cuts: list[tuple[int | None, str | None]],
+    unit: str = "this fragment",
+):
     """
     Render seq (monospace) with each restriction enzyme's cut site
     highlighted in place. cuts: list of (cut_pos_1based_in_full_construct,
-    enzyme_name) — mirrors the CLI's cut-site marking exactly.
+    enzyme_name) — mirrors the CLI's cut-site marking exactly. frag_start is
+    the 0-based absolute position where seq begins in the full construct
+    (0 when seq itself IS the full construct).
     """
     marked = seq
     labels = []
@@ -338,7 +343,7 @@ def _render_seq_with_cuts(seq: str, frag_start: int, cuts: list[tuple[int | None
     if labels:
         st.caption(
             "Cut site(s): " + ", ".join(
-                f"{enzyme} at nt {rel} in this fragment" for rel, enzyme in sorted(labels)
+                f"{enzyme} at nt {rel} in {unit}" for rel, enzyme in sorted(labels)
             )
         )
 
@@ -474,6 +479,17 @@ def _render_result(result, key_prefix=""):
             f'cd {result.frag_cd_bp} bp  ·  assembled {result.frag_ad_bp} bp</span></div>'
         )
     st.markdown(f'<div class="result-card">{frag_html}</div>', unsafe_allow_html=True)
+
+    if result.mutated_sequence and (result.primer_A or result.primer_D):
+        with st.expander(
+            f"Show cut sites in the full construct ({len(result.mutated_sequence)} bp)"
+        ):
+            whole_cuts = []
+            if result.primer_A:
+                whole_cuts.append((result.primer_A.cut_pos, result.primer_A.enzyme))
+            if result.primer_D:
+                whole_cuts.append((result.primer_D.cut_pos, result.primer_D.enzyme))
+            _render_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="the full construct")
 
     if result.frag_ad_bp:
         with st.expander("Show PCR product sequences (cut sites marked)"):

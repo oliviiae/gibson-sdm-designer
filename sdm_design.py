@@ -231,6 +231,29 @@ def _print_candidates(label: str, res, show_all: bool):
         print(f"  … and {len(cands)-limit} more (use --all-candidates to show all)")
 
 
+def _print_seq_with_cuts(seq: str, frag_start: int, cuts: list, unit: str = "this fragment"):
+    """
+    Print seq with a caret marking each restriction enzyme's cut position.
+    cuts: list of (cut_pos_1based_in_full_construct, enzyme_name_or_None).
+    frag_start: 0-based absolute position where seq begins in the full
+    construct (0 when seq itself IS the full construct).
+    """
+    print(f"      {seq}")
+    markers = [" "] * len(seq)
+    labels = []
+    for cut_pos, label in cuts:
+        if cut_pos is None:
+            continue
+        rel = (cut_pos - 1) - frag_start
+        if 0 <= rel < len(seq):
+            markers[rel] = "^"
+            labels.append((rel, label))
+    if labels:
+        print(f"      {''.join(markers)}".rstrip())
+        for rel, label in sorted(labels):
+            print(f"      {' ' * rel}└─ {label} cuts here (nt {rel} in {unit})")
+
+
 def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     """Wrap each [start, end) span in seq with [ ]. spans may be unsorted/adjacent."""
     out = seq
@@ -367,28 +390,24 @@ def _print_formatted(result, show_all_candidates: bool):
     print(f"\n    Overlap  Tm={result.overlap_tm:.0f}°C  "
           f"{result.overlap_seq}  ({len(result.overlap_seq)} bp)")
 
+    # Cut sites on the whole construct (not just within each small fragment) —
+    # gives the full-sequence context of where A and D actually cut relative
+    # to everything else, not just their position within an isolated PCR piece.
+    if result.mutated_sequence and (result.primer_A or result.primer_D):
+        print(f"\n  {_hr()}")
+        print(f"  Cut sites in the full construct  "
+              f"({len(result.mutated_sequence)} bp)")
+        whole_cuts = []
+        if result.primer_A:
+            whole_cuts.append((result.primer_A.cut_pos, result.primer_A.enzyme))
+        if result.primer_D:
+            whole_cuts.append((result.primer_D.cut_pos, result.primer_D.enzyme))
+        _print_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="full construct")
+
     # PCR products (sizes + sequences, with cut sites marked)
     if result.frag_ad_bp:
         print(f"\n  {_hr()}")
         print(f"  Predicted PCR products")
-
-        def _print_seq_with_cuts(seq: str, frag_start: int, cuts: list):
-            """cuts: list of (cut_pos_1based_in_full_construct, label)."""
-            print(f"      {seq}")
-            marks = ["  ", " "]  # align under the 6-space seq indent
-            markers = [" "] * len(seq)
-            labels = []
-            for cut_pos, label in cuts:
-                if cut_pos is None:
-                    continue
-                rel = (cut_pos - 1) - frag_start
-                if 0 <= rel < len(seq):
-                    markers[rel] = "^"
-                    labels.append((rel, label))
-            if labels:
-                print(f"      {''.join(markers)}".rstrip())
-                for rel, label in sorted(labels):
-                    print(f"      {' ' * rel}└─ {label} cuts here (nt {rel} in this fragment)")
 
         pa, pd = result.primer_A, result.primer_D
         print(f"    Fragment ab  {result.frag_ab_bp:>7} bp  "
