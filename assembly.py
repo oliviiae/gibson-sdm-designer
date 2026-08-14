@@ -187,21 +187,39 @@ def verify_mutation(
     mut_protein = translate_orf(assembled_seq, orf_start_in_assembled)
 
     aa_idx = aa_position - 1   # 0-based
+    new_aa = new_aa.upper()
 
-    # Observed amino acid at the target position
-    if aa_idx >= len(mut_protein):
-        return MutationCheck(
-            passed=False,
-            aa_position=aa_position,
-            expected_aa=new_aa,
-            observed_aa="?",
-            message=f"ORF too short: translated length {len(mut_protein)} < aa_position {aa_position}",
-        )
+    if new_aa == "*":
+        # A nonsense (stop-codon) mutation is verified differently: translate_orf
+        # always strips the stop codon itself from its return value, so mut_protein
+        # can never literally contain '*' at aa_idx — the correct signal instead is
+        # that translation terminates exactly one residue short of aa_position
+        # (i.e. mut_protein has exactly aa_idx residues).
+        if len(mut_protein) == aa_idx:
+            observed = "*"
+            target_ok = True
+        elif len(mut_protein) > aa_idx:
+            observed = mut_protein[aa_idx]
+            target_ok = False
+        else:
+            observed = "?"
+            target_ok = False
+    else:
+        # Observed amino acid at the target position
+        if aa_idx >= len(mut_protein):
+            return MutationCheck(
+                passed=False,
+                aa_position=aa_position,
+                expected_aa=new_aa,
+                observed_aa="?",
+                message=f"ORF too short: translated length {len(mut_protein)} < aa_position {aa_position}",
+            )
+        observed = mut_protein[aa_idx]
+        target_ok = observed == new_aa
 
-    observed = mut_protein[aa_idx]
-    target_ok = observed == new_aa.upper()
-
-    # Scan for any other differences
+    # Scan for any other differences (only over the region actually present in
+    # both proteins — for a stop mutation, mut_protein simply ends earlier, so
+    # zip() naturally limits the comparison to before the truncation point).
     extra: list[tuple[int, str, str]] = []
     for i, (wt, mt) in enumerate(zip(wt_protein, mut_protein), start=1):
         if i == aa_position:
