@@ -297,18 +297,51 @@ def _print_formatted(result, show_all_candidates: bool):
     print(f"\n    Overlap  Tm={result.overlap_tm:.0f}°C  "
           f"{result.overlap_seq}  ({len(result.overlap_seq)} bp)")
 
-    # PCR products (sizes + sequences)
+    # PCR products (sizes + sequences, with cut sites marked)
     if result.frag_ad_bp:
         print(f"\n  {_hr()}")
         print(f"  Predicted PCR products")
+
+        def _print_seq_with_cuts(seq: str, frag_start: int, cuts: list):
+            """cuts: list of (cut_pos_1based_in_full_construct, label)."""
+            print(f"      {seq}")
+            marks = ["  ", " "]  # align under the 6-space seq indent
+            markers = [" "] * len(seq)
+            labels = []
+            for cut_pos, label in cuts:
+                if cut_pos is None:
+                    continue
+                rel = (cut_pos - 1) - frag_start
+                if 0 <= rel < len(seq):
+                    markers[rel] = "^"
+                    labels.append((rel, label))
+            if labels:
+                print(f"      {''.join(markers)}".rstrip())
+                for rel, label in sorted(labels):
+                    print(f"      {' ' * rel}└─ {label} cuts here (nt {rel} in this fragment)")
+
+        pa, pd = result.primer_A, result.primer_D
         print(f"    Fragment ab  {result.frag_ab_bp:>7} bp  "
               f"(primer A → overlap end)")
-        print(f"      {result.frag_ab_seq}")
+        _print_seq_with_cuts(
+            result.frag_ab_seq, pa.start if pa else 0,
+            [(pa.cut_pos, pa.enzyme) if pa else (None, None)],
+        )
         print(f"    Fragment cd  {result.frag_cd_bp:>7} bp  "
               f"(overlap start → primer D)")
-        print(f"      {result.frag_cd_seq}")
+        cd_start = result.bc_result.overlap_start if result.bc_result else 0
+        _print_seq_with_cuts(
+            result.frag_cd_seq, cd_start,
+            [(pd.cut_pos, pd.enzyme) if pd else (None, None)],
+        )
         print(f"    Assembled    {result.frag_ad_bp:>7} bp")
-        print(f"      {result.frag_ad_seq}")
+        _print_seq_with_cuts(
+            result.frag_ad_seq, pa.start if pa else 0,
+            [
+                (pa.cut_pos, pa.enzyme) if pa else (None, None),
+                (pd.cut_pos, pd.enzyme) if pd else (None, None),
+            ],
+        )
 
     # All A/D candidates if requested
     if show_all_candidates and result.ad_result_a and result.ad_result_d:
