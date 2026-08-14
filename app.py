@@ -22,6 +22,7 @@ from pipeline import (
 from primer_ad import NEB_CATALOG
 from assembly import translate_orf
 from xdna_utils import read_xdna_sequence
+from restriction_utils import scan_sites
 
 st.set_page_config(page_title="Gibson Primer Designer", layout="wide")
 
@@ -310,6 +311,26 @@ def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     return out
 
 
+def _collect_all_cut_sites(result) -> list[tuple[int | None, str | None]]:
+    """
+    Every restriction cut site actually relevant to this design: primer A's
+    site, primer D's site, and the diagnostic enzyme's site(s) — the one
+    used to verify the clone by digest, easy to overlook since it isn't "A"
+    or "D". Only meaningful when the diagnostic site was GAINED (present in
+    the mutated sequence); a LOST site has nothing to mark since it's absent.
+    """
+    cuts: list[tuple[int | None, str | None]] = []
+    if result.primer_A:
+        cuts.append((result.primer_A.cut_pos, f"{result.primer_A.enzyme} (primer A)"))
+    if result.primer_D:
+        cuts.append((result.primer_D.cut_pos, f"{result.primer_D.enzyme} (primer D)"))
+    if result.diagnostic and result.diagnostic.effect == "gained" and result.mutated_sequence:
+        positions = scan_sites(result.mutated_sequence).get(result.diagnostic.enzyme, [])
+        for pos in positions:
+            cuts.append((pos, f"{result.diagnostic.enzyme} (diagnostic)"))
+    return cuts
+
+
 def _render_seq_with_cuts(
     seq: str, frag_start: int, cuts: list[tuple[int | None, str | None]],
     unit: str = "this fragment",
@@ -480,15 +501,11 @@ def _render_result(result, key_prefix=""):
         )
     st.markdown(f'<div class="result-card">{frag_html}</div>', unsafe_allow_html=True)
 
-    if result.mutated_sequence and (result.primer_A or result.primer_D):
+    whole_cuts = _collect_all_cut_sites(result)
+    if result.mutated_sequence and whole_cuts:
         with st.expander(
             f"Show cut sites in the full construct ({len(result.mutated_sequence)} bp)"
         ):
-            whole_cuts = []
-            if result.primer_A:
-                whole_cuts.append((result.primer_A.cut_pos, result.primer_A.enzyme))
-            if result.primer_D:
-                whole_cuts.append((result.primer_D.cut_pos, result.primer_D.enzyme))
             _render_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="the full construct")
 
     if result.frag_ad_bp:

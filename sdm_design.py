@@ -45,6 +45,7 @@ from pipeline import (
 )
 from assembly import print_report, translate_orf
 from primer_ad import NEB_CATALOG
+from restriction_utils import scan_sites
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +255,26 @@ def _print_seq_with_cuts(seq: str, frag_start: int, cuts: list, unit: str = "thi
             print(f"      {' ' * rel}└─ {label} cuts here (nt {rel} in {unit})")
 
 
+def _collect_all_cut_sites(result) -> list[tuple[int | None, str | None]]:
+    """
+    Every restriction cut site actually relevant to this design: primer A's
+    site, primer D's site, and the diagnostic enzyme's site(s) — the one
+    used to verify the clone by digest, easy to overlook since it isn't "A"
+    or "D". Only meaningful when the diagnostic site was GAINED (present in
+    the mutated sequence); a LOST site has nothing to mark since it's absent.
+    """
+    cuts: list[tuple[int | None, str | None]] = []
+    if result.primer_A:
+        cuts.append((result.primer_A.cut_pos, f"{result.primer_A.enzyme} (primer A)"))
+    if result.primer_D:
+        cuts.append((result.primer_D.cut_pos, f"{result.primer_D.enzyme} (primer D)"))
+    if result.diagnostic and result.diagnostic.effect == "gained" and result.mutated_sequence:
+        positions = scan_sites(result.mutated_sequence).get(result.diagnostic.enzyme, [])
+        for pos in positions:
+            cuts.append((pos, f"{result.diagnostic.enzyme} (diagnostic)"))
+    return cuts
+
+
 def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     """Wrap each [start, end) span in seq with [ ]. spans may be unsorted/adjacent."""
     out = seq
@@ -391,17 +412,15 @@ def _print_formatted(result, show_all_candidates: bool):
           f"{result.overlap_seq}  ({len(result.overlap_seq)} bp)")
 
     # Cut sites on the whole construct (not just within each small fragment) —
-    # gives the full-sequence context of where A and D actually cut relative
-    # to everything else, not just their position within an isolated PCR piece.
-    if result.mutated_sequence and (result.primer_A or result.primer_D):
+    # gives the full-sequence context of where every enzyme relevant to this
+    # design actually cuts: primer A's site, primer D's site, AND the
+    # diagnostic enzyme's site (the one you'd actually digest with to
+    # confirm the clone — easy to forget since it's not "A" or "D").
+    whole_cuts = _collect_all_cut_sites(result)
+    if result.mutated_sequence and whole_cuts:
         print(f"\n  {_hr()}")
         print(f"  Cut sites in the full construct  "
               f"({len(result.mutated_sequence)} bp)")
-        whole_cuts = []
-        if result.primer_A:
-            whole_cuts.append((result.primer_A.cut_pos, result.primer_A.enzyme))
-        if result.primer_D:
-            whole_cuts.append((result.primer_D.cut_pos, result.primer_D.enzyme))
         _print_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="full construct")
 
     # PCR products (sizes + sequences, with cut sites marked)
