@@ -1,5 +1,5 @@
 """
-Web app for Gibson SDM primer design.
+Web app for Gibson primer design.
 
 Run locally:
     streamlit run app.py
@@ -18,7 +18,7 @@ from Bio.Seq import Seq
 from pipeline import design_mutation_primers, find_all_positions, parse_mutation_label
 from primer_ad import NEB_CATALOG
 
-st.set_page_config(page_title="Gibson SDM Primer Design", layout="wide")
+st.set_page_config(page_title="Gibson Primer Designer", layout="wide")
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +192,7 @@ def _badge(passed) -> str:
 # Header
 # ---------------------------------------------------------------------------
 
-st.markdown('<div class="app-title">Gibson SDM Primer Design</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-title">Gibson Primer Designer</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="app-subtitle">'
     'Automated primer design for Gibson-assembly site-directed mutagenesis, '

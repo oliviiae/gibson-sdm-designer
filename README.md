@@ -1,5 +1,5 @@
 ---
-title: Gibson SDM Primer Designer
+title: Gibson Primer Designer
 emoji: 🧬
 colorFrom: blue
 colorTo: gray
@@ -9,7 +9,7 @@ app_file: app.py
 pinned: false
 ---
 
-# Gibson SDM Primer Designer
+# Gibson Primer Designer
 
 Automated primer design for Gibson-assembly site-directed mutagenesis, with
 restriction-site verification and NEB catalog lookup.

@@ -422,7 +422,7 @@ def print_report(report: VerificationReport) -> None:
         return "PASS ✓" if passed else "FAIL ✗"
 
     print(f"\n{'═'*W}")
-    print(f"  Gibson SDM Assembly Report — {report.mutation_label}")
+    print(f"  Gibson Assembly Report — {report.mutation_label}")
     print(f"{'═'*W}")
 
     print(f"\n  Mutation")

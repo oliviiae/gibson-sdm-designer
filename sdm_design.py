@@ -48,7 +48,7 @@ from primer_ad import NEB_CATALOG
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="sdm_design.py",
-        description="Design Gibson SDM primers for a point mutation.",
+        description="Design Gibson primers for a point mutation.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:
@@ -222,7 +222,7 @@ def _print_candidates(label: str, res, show_all: bool):
 def _print_formatted(result, show_all_candidates: bool):
     print()
     print(_hr("═"))
-    print(f"  Gibson SDM Primer Design — {result.mutation_label}")
+    print(f"  Gibson Primer Designer — {result.mutation_label}")
     print(_hr("═"))
 
     # Warnings / errors at the top

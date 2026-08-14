@@ -137,7 +137,7 @@ def design_bc_primers(
     min_overlap: int = 16,
 ) -> PrimerBCResult:
     """
-    Design primers B and C for Gibson SDM.
+    Design primers B and C for Gibson.
 
     Parameters
     ----------

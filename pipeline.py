@@ -234,7 +234,7 @@ def design_mutation_primers(
     max_ad_window_expansions: int = 3,
 ) -> PipelineResult:
     """
-    Full Gibson SDM primer design pipeline (Parts 1–6).
+    Full Gibson primer design pipeline (Parts 1–6).
 
     Parameters
     ----------
