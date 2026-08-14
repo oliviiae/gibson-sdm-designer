@@ -162,6 +162,11 @@ class VerificationReport:
     frag_cd_len: int
     assembled_len: int
 
+    # Fragment sequences (5'→3', sense strand)
+    frag_ab_seq: str
+    frag_cd_seq: str
+    assembled_seq: str
+
     # Verification
     mutation_check: MutationCheck
     restriction_check: RestrictionCheck | None   # None if no diagnostic site
@@ -349,9 +354,11 @@ def run_full_verification(
         overlap_end=bc.overlap_end,
     )
 
-    # Fragment sizes (each fragment includes the overlap once)
+    # Fragment sizes and sequences (each fragment includes the overlap once)
     frag_ab_len = bc.overlap_end   - top_a.primer_start
     frag_cd_len = top_d.primer_end - bc.overlap_start
+    frag_ab_seq = mutated_seq[top_a.primer_start:bc.overlap_end]
+    frag_cd_seq = mutated_seq[bc.overlap_start:top_d.primer_end]
 
     # --- Translation check ---------------------------------------------------
     # Translate the FULL construct (not just the isolated A→D PCR fragment).
@@ -403,6 +410,9 @@ def run_full_verification(
         frag_ab_len=frag_ab_len,
         frag_cd_len=frag_cd_len,
         assembled_len=len(assembled),
+        frag_ab_seq=frag_ab_seq,
+        frag_cd_seq=frag_cd_seq,
+        assembled_seq=assembled,
 
         mutation_check=mut_check,
         restriction_check=rest_check,
@@ -444,12 +454,15 @@ def print_report(report: VerificationReport) -> None:
     print(f"    {report.overlap_seq}  ({len(report.overlap_seq)} bp, "
           f"Tm={report.overlap_tm:.0f}°C)")
 
-    print(f"\n  Predicted fragment sizes")
+    print(f"\n  Predicted PCR products")
     print(f"    Fragment ab  {report.frag_ab_len:>6} bp  "
           f"(primer A start → overlap end)")
+    print(f"    {report.frag_ab_seq}")
     print(f"    Fragment cd  {report.frag_cd_len:>6} bp  "
           f"(overlap start → primer D end)")
+    print(f"    {report.frag_cd_seq}")
     print(f"    Assembled    {report.assembled_len:>6} bp")
+    print(f"    {report.assembled_seq}")
 
     print(f"\n  {sep}")
     mc = report.mutation_check

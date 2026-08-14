@@ -297,15 +297,18 @@ def _print_formatted(result, show_all_candidates: bool):
     print(f"\n    Overlap  Tm={result.overlap_tm:.0f}°C  "
           f"{result.overlap_seq}  ({len(result.overlap_seq)} bp)")
 
-    # Fragment sizes
+    # PCR products (sizes + sequences)
     if result.frag_ad_bp:
         print(f"\n  {_hr()}")
-        print(f"  Predicted PCR fragments")
+        print(f"  Predicted PCR products")
         print(f"    Fragment ab  {result.frag_ab_bp:>7} bp  "
               f"(primer A → overlap end)")
+        print(f"      {result.frag_ab_seq}")
         print(f"    Fragment cd  {result.frag_cd_bp:>7} bp  "
               f"(overlap start → primer D)")
+        print(f"      {result.frag_cd_seq}")
         print(f"    Assembled    {result.frag_ad_bp:>7} bp")
+        print(f"      {result.frag_ad_seq}")
 
     # All A/D candidates if requested
     if show_all_candidates and result.ad_result_a and result.ad_result_d:

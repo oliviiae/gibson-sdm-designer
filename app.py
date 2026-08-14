@@ -334,6 +334,15 @@ def _render_result(result, key_prefix=""):
         )
     st.markdown(f'<div class="result-card">{frag_html}</div>', unsafe_allow_html=True)
 
+    if result.frag_ad_bp:
+        with st.expander("Show PCR product sequences"):
+            st.caption(f"Fragment ab — {result.frag_ab_bp} bp (primer A → overlap end)")
+            st.code(result.frag_ab_seq, language=None)
+            st.caption(f"Fragment cd — {result.frag_cd_bp} bp (overlap start → primer D)")
+            st.code(result.frag_cd_seq, language=None)
+            st.caption(f"Assembled product — {result.frag_ad_bp} bp")
+            st.code(result.frag_ad_seq, language=None)
+
     st.markdown('<div class="section-label">Verification</div>', unsafe_allow_html=True)
     verify_html = (
         f'<div class="verify-row"><span class="verify-label">Translation check</span>'
@@ -353,6 +362,12 @@ def _render_result(result, key_prefix=""):
         + f"\n\nOverlap: {result.overlap_seq}\n"
         f"Overall: {'PASS' if result.overall_passed else 'FAIL'}\n"
     )
+    if result.frag_ad_bp:
+        report_text += (
+            f"\nFragment ab ({result.frag_ab_bp} bp): {result.frag_ab_seq}\n"
+            f"Fragment cd ({result.frag_cd_bp} bp): {result.frag_cd_seq}\n"
+            f"Assembled product ({result.frag_ad_bp} bp): {result.frag_ad_seq}\n"
+        )
     st.download_button("Download report", report_text,
                         file_name=f"{result.mutation_label}_report.txt",
                         key=f"{key_prefix}dl")

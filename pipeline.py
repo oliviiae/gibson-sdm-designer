@@ -87,6 +87,11 @@ class PipelineResult:
     frag_cd_bp: int = 0
     frag_ad_bp: int = 0    # total assembled product
 
+    # ── Fragment sequences (5'→3', sense strand) ────────────────────────────
+    frag_ab_seq: str = ""
+    frag_cd_seq: str = ""
+    frag_ad_seq: str = ""  # the full assembled PCR product
+
     # ── Verification ──────────────────────────────────────────────────────
     translation_passed: bool | None = None
     restriction_passed: bool | None = None
@@ -686,6 +691,9 @@ def design_mutation_primers(
             result.frag_ab_bp = report.frag_ab_len
             result.frag_cd_bp = report.frag_cd_len
             result.frag_ad_bp = report.assembled_len
+            result.frag_ab_seq = report.frag_ab_seq
+            result.frag_cd_seq = report.frag_cd_seq
+            result.frag_ad_seq = report.assembled_seq
 
             mc = report.mutation_check
             result.translation_passed = mc.passed
@@ -758,6 +766,7 @@ def result_to_dict(r: PipelineResult) -> dict[str, Any]:
         overlap=dict(sequence=r.overlap_seq, tm=r.overlap_tm),
         diagnostic=_diag(r.diagnostic),
         fragment_lengths=dict(ab=r.frag_ab_bp, cd=r.frag_cd_bp, ad=r.frag_ad_bp),
+        fragment_sequences=dict(ab=r.frag_ab_seq, cd=r.frag_cd_seq, ad=r.frag_ad_seq),
         verification=dict(
             translation=dict(passed=r.translation_passed, detail=r.translation_detail),
             restriction=dict(passed=r.restriction_passed, detail=r.restriction_detail),
