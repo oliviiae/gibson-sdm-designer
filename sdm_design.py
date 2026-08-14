@@ -15,7 +15,11 @@ Options
   --orf-start INT       0-based position of the first base of the ORF (the A
                         in the ATG start codon).  Required.
   --mutation STR        Mutation in <original><position><new> format, e.g. K255E.
-                        Alternatively supply --orig-aa, --position, --new-aa.
+                        For a combined double mutation sharing one primer set,
+                        join two with "+": K255E+R300A. Only close-together
+                        positions can realistically share one B/C overlap.
+                        Alternatively supply --orig-aa, --position, --new-aa
+                        (single mutation only).
   --orig-aa AA          Single-letter original amino acid (e.g. K).
   --position INT        1-based amino acid position.
   --new-aa AA           Single-letter desired amino acid (e.g. E).
@@ -36,8 +40,10 @@ import textwrap
 
 from Bio import SeqIO
 
-from pipeline import design_mutation_primers, parse_mutation_label, result_to_dict
-from assembly import print_report
+from pipeline import (
+    design_mutation_primers, parse_mutation_label, parse_mutation_labels, result_to_dict,
+)
+from assembly import print_report, translate_orf
 from primer_ad import NEB_CATALOG
 
 
@@ -80,8 +86,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         "out, with the reason for each.")
 
     mut_group = p.add_argument_group("mutation specification (use --mutation OR all three)")
-    mut_group.add_argument("--mutation", metavar="e.g. K255E",
-                           help="Compact mutation label.")
+    mut_group.add_argument("--mutation", metavar="e.g. K255E or K255E+R300A",
+                           help="Compact mutation label. Join two with '+' "
+                                "for a combined double mutation sharing one "
+                                "primer set.")
     mut_group.add_argument("--orig-aa",  metavar="AA")
     mut_group.add_argument("--position", type=int, metavar="INT")
     mut_group.add_argument("--new-aa",   metavar="AA")
@@ -119,20 +127,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _resolve_mutation(args: argparse.Namespace) -> tuple[str, int, str]:
-    """Return (original_aa, position, new_aa) or exit with an error."""
+def _resolve_mutations(args: argparse.Namespace) -> list[tuple[str, int, str]]:
+    """
+    Return a list of (original_aa, position, new_aa) tuples — one entry for
+    a single mutation, multiple for a combined "+"-joined multi-mutation
+    (e.g. --mutation K255E+R300A) — or exit with an error.
+    """
     if args.mutation:
         try:
-            return parse_mutation_label(args.mutation)
+            return parse_mutation_labels(args.mutation)
         except ValueError as exc:
             sys.exit(f"ERROR: {exc}")
 
     if args.orig_aa and args.position and args.new_aa:
-        return args.orig_aa.upper(), args.position, args.new_aa.upper()
+        return [(args.orig_aa.upper(), args.position, args.new_aa.upper())]
 
     sys.exit(
-        "ERROR: Provide either --mutation (e.g. K255E) "
-        "or all three of --orig-aa, --position, --new-aa."
+        "ERROR: Provide either --mutation (e.g. K255E, or K255E+R300A for a "
+        "combined double mutation) or all three of --orig-aa, --position, --new-aa."
     )
 
 
@@ -219,6 +231,58 @@ def _print_candidates(label: str, res, show_all: bool):
         print(f"  … and {len(cands)-limit} more (use --all-candidates to show all)")
 
 
+def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
+    """Wrap each [start, end) span in seq with [ ]. spans may be unsorted/adjacent."""
+    out = seq
+    for start, end in sorted(spans, key=lambda s: -s[0]):
+        out = out[:start] + "[" + out[start:end] + "]" + out[end:]
+    return out
+
+
+def _print_mutated_region(result, aa_flank: int = 15):
+    """
+    Print the mutated ORF's DNA and translated protein for a window around
+    the mutation(s), with the changed codon(s)/residue(s) bracketed.
+    """
+    if not result.mutated_sequence or not result.mutation_positions:
+        return
+
+    orf_start = result.orf_start_detected
+    mutated_seq = result.mutated_sequence
+    positions = result.mutation_positions  # 1-based aa positions
+
+    try:
+        protein = translate_orf(mutated_seq, orf_start)
+    except ValueError:
+        return
+    if not protein:
+        return
+
+    aa_min, aa_max = min(positions), max(positions)
+    win_start = max(1, aa_min - aa_flank)
+    win_end = min(len(protein), aa_max + aa_flank)
+
+    dna_start = orf_start + (win_start - 1) * 3
+    dna_end = orf_start + win_end * 3
+    dna_window = mutated_seq[dna_start:dna_end]
+    protein_window = protein[win_start - 1: win_end]
+
+    codon_spans = [
+        ((pos - win_start) * 3, (pos - win_start) * 3 + 3)
+        for pos in positions if win_start <= pos <= win_end
+    ]
+    residue_spans = [
+        (pos - win_start, pos - win_start + 1)
+        for pos in positions if win_start <= pos <= win_end
+    ]
+
+    print(f"\n  {_hr()}")
+    print(f"  Mutated region  (aa {win_start}-{win_end}, "
+          f"changed codon(s)/residue(s) in [brackets])")
+    print(f"    DNA      5'-{_bracket_spans(dna_window, codon_spans)}-3'")
+    print(f"    Protein     {_bracket_spans(protein_window, residue_spans)}")
+
+
 def _print_formatted(result, show_all_candidates: bool):
     print()
     print(_hr("═"))
@@ -239,6 +303,12 @@ def _print_formatted(result, show_all_candidates: bool):
     print(f"  Codon           {result.original_codon} → {result.new_codon}")
     print(f"  ORF start       nt {result.orf_start_detected}  (0-based)")
     print(f"  Mutation site   nt {result.mutation_nt_position}  (0-based, first changed base)")
+
+    # Mutated region: DNA + translation, with the changed codon(s)/residue(s)
+    # bracketed. Shown as a local window (not the whole ORF) since a real
+    # gene can be thousands of bp — the useful check is what's right around
+    # the edit, not scrolling through the entire coding sequence.
+    _print_mutated_region(result)
 
     # Diagnostic
     print(f"\n  {_hr()}")
@@ -670,21 +740,22 @@ def main(argv: list[str] | None = None):
 
         sys.exit(0 if working else 1)
 
-    orig_aa, position, new_aa = _resolve_mutation(args)
+    mutations = _resolve_mutations(args)
+    label = " + ".join(f"{oa}{p}{na}" for oa, p, na in mutations)
 
     orf_note = f"ORF start {args.orf_start}" if args.orf_start is not None \
                else "ORF start auto-detect"
     print(
-        f"Designing primers for {orig_aa}{position}{new_aa} "
+        f"Designing primers for {label} "
         f"in {args.fasta_file} ({len(sequence)} bp, {orf_note})…",
         file=sys.stderr,
     )
 
     result = design_mutation_primers(
         sequence=sequence,
-        target_position=position,
-        original_aa=orig_aa,
-        new_aa=new_aa,
+        target_position=[p for _, p, _ in mutations],
+        original_aa=[oa for oa, _, _ in mutations],
+        new_aa=[na for _, _, na in mutations],
         orf_start=args.orf_start,
         tm_range=(args.tm_min, args.tm_max),
         window_bp=tuple(args.window),
@@ -714,9 +785,9 @@ def main(argv: list[str] | None = None):
             (["python3", "sdm_design.py", args.fasta_file, "--orf-start", str(args.orf_start)]
              if args.orf_start is not None else
              ["python3", "sdm_design.py", args.fasta_file])
-            + (["--mutation", f"{orig_aa}{position}{new_aa}"])
+            + (["--mutation", label.replace(" ", "")])
             + (["--json"] if args.json else [])
-            + ["--output", f"{orig_aa}{position}{new_aa}_report.{'json' if args.json else 'txt'}"]
+            + ["--output", f"{label.replace(' ', '')}_report.{'json' if args.json else 'txt'}"]
         )
         print(f"\nTo save this output to a file, rerun with:\n  {save_cmd}", file=sys.stderr)
 

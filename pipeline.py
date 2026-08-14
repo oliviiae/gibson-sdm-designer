@@ -63,13 +63,20 @@ class DiagnosticInfo:
 @dataclass
 class PipelineResult:
     # ── Input echo ────────────────────────────────────────────────────────
-    mutation_label: str          # e.g. "K15E"
+    mutation_label: str          # e.g. "K15E", or "K15E + R255A" for a combined mutation
     orf_start: int
-    original_codon: str
-    new_codon: str
+    original_codon: str          # " / "-joined for multiple mutations
+    new_codon: str                # " / "-joined for multiple mutations
     changed_positions: list[int]
     orf_start_detected: int = 0       # the orf_start actually used (auto or supplied)
     mutation_nt_position: int = 0     # 0-based nucleotide position of first changed base
+
+    # ── Structured per-mutation detail (length 1 for a single mutation) ────
+    mutation_positions: list[int] = field(default_factory=list)
+    original_aas: list[str] = field(default_factory=list)
+    new_aas: list[str] = field(default_factory=list)
+    original_codons: list[str] = field(default_factory=list)
+    new_codons: list[str] = field(default_factory=list)
 
     # ── Primers ───────────────────────────────────────────────────────────
     primer_A: PrimerInfo | None = None
@@ -91,6 +98,9 @@ class PipelineResult:
     frag_ab_seq: str = ""
     frag_cd_seq: str = ""
     frag_ad_seq: str = ""  # the full assembled PCR product
+
+    # ── Full mutated construct (5'→3', includes any silent mutation too) ───
+    mutated_sequence: str = ""
 
     # ── Verification ──────────────────────────────────────────────────────
     translation_passed: bool | None = None
@@ -141,6 +151,26 @@ def parse_mutation_label(label: str) -> tuple[str, int, str]:
             "Expected format: <original_AA><position><new_AA>, e.g. K255E"
         )
     return m.group(1).upper(), int(m.group(2)), m.group(3).upper()
+
+
+def parse_mutation_labels(label: str) -> list[tuple[str, int, str]]:
+    """
+    Parse one or more '+'-separated mutation labels, e.g. 'K255E' or
+    'K255E+R300A' for a combined double mutation.
+    Returns a list of (original_aa, position_1based, new_aa) tuples.
+    Raises ValueError on bad format, or on duplicate positions.
+    """
+    parts = [p.strip() for p in label.split("+") if p.strip()]
+    if not parts:
+        raise ValueError(f"Cannot parse mutation '{label}'.")
+    mutations = [parse_mutation_label(p) for p in parts]
+    positions = [pos for _, pos, _ in mutations]
+    if len(set(positions)) != len(positions):
+        raise ValueError(
+            f"Duplicate amino acid position(s) in '{label}' — each mutation "
+            "must target a different position."
+        )
+    return mutations
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +254,9 @@ def _silent_mutation_seq(
 
 def design_mutation_primers(
     sequence: str,
-    target_position: int,
-    original_aa: str,
-    new_aa: str,
+    target_position: int | list[int],
+    original_aa: str | list[str],
+    new_aa: str | list[str],
     *,
     orf_start: int | None = None,
     tm_range: tuple[float, float] = (48.0, 54.0),
@@ -244,12 +274,22 @@ def design_mutation_primers(
     Parameters
     ----------
     sequence         : DNA sequence of the full construct (any case; IUPAC A/C/G/T)
-    target_position  : 1-based amino acid number to mutate
+    target_position  : 1-based amino acid number to mutate. Pass a list of
+                       positions (with matching lists for original_aa and
+                       new_aa) to design a combined multi-mutation — all
+                       mutations must fall close enough together to share
+                       one B/C overlap region (a double mutation a few
+                       codons apart is realistic; one spanning hundreds of
+                       bp is not — the overlap Tm/length search will simply
+                       fail to find a window, same as it would by hand).
     original_aa      : single-letter AA expected at that position (confirms identity)
     new_aa           : desired amino acid
     orf_start        : 0-based position where the ORF begins (the A in ATG).
                        If None, the sequence is scanned automatically and the
-                       unique ATG that places original_aa at target_position is used.
+                       unique ATG that places original_aa at target_position is
+                       used. Auto-detection only supports a single mutation —
+                       orf_start must be supplied explicitly for a multi-mutation
+                       design.
     tm_range         : Wallace Tm window for all primer walks (default 48–54°C)
     window_bp        : (near, far) bp distance from the B/C region to search for
                        a flanking restriction site, applied on EACH side
@@ -279,9 +319,19 @@ def design_mutation_primers(
     Check result.errors for fatal failures; result.warnings for soft ones.
     """
     sequence = sequence.upper().strip()
-    original_aa = original_aa.upper()
-    new_aa = new_aa.upper()
-    mutation_label = f"{original_aa}{target_position}{new_aa}"
+
+    positions      = list(target_position) if isinstance(target_position, (list, tuple)) else [target_position]
+    original_aas   = [a.upper() for a in original_aa] if isinstance(original_aa, (list, tuple)) else [original_aa.upper()]
+    new_aas        = [a.upper() for a in new_aa]      if isinstance(new_aa, (list, tuple))      else [new_aa.upper()]
+    if not (len(positions) == len(original_aas) == len(new_aas)):
+        raise ValueError(
+            f"target_position, original_aa, and new_aa must all be the same "
+            f"length ({len(positions)}, {len(original_aas)}, {len(new_aas)})."
+        )
+    is_multi = len(positions) > 1
+    mutation_label = " + ".join(
+        f"{oa}{p}{na}" for p, oa, na in zip(positions, original_aas, new_aas)
+    )
 
     result = PipelineResult(
         mutation_label=mutation_label,
@@ -293,24 +343,30 @@ def design_mutation_primers(
 
     try:
         # ── Step 0: resolve orf_start and validate inputs ────────────────────
-        if target_position < 1:
-            raise _PipelineError("target_position must be ≥ 1.")
+        for pos in positions:
+            if pos < 1:
+                raise _PipelineError("target_position must be ≥ 1.")
 
         if orf_start is None:
+            if is_multi:
+                raise _PipelineError(
+                    "orf_start must be supplied explicitly for a multi-mutation "
+                    "design (auto-detection only supports a single mutation)."
+                )
             # Auto-detect: find every ATG where position target_position is original_aa
-            candidates = find_orf_start(sequence, original_aa, target_position)
+            candidates = find_orf_start(sequence, original_aas[0], positions[0])
             if len(candidates) == 0:
                 raise _PipelineError(
                     f"Could not find an ATG in the sequence where amino acid "
-                    f"{target_position} is {original_aa}. "
+                    f"{positions[0]} is {original_aas[0]}. "
                     "Check that the mutation label matches the sequence, "
                     "or supply --orf-start manually."
                 )
             if len(candidates) > 1:
                 positions_str = ", ".join(str(c) for c in candidates)
                 raise _PipelineError(
-                    f"Found {len(candidates)} ATGs where position {target_position} "
-                    f"is {original_aa} (at nt positions {positions_str}). "
+                    f"Found {len(candidates)} ATGs where position {positions[0]} "
+                    f"is {original_aas[0]} (at nt positions {positions_str}). "
                     "Sequence is ambiguous — supply --orf-start to specify which one."
                 )
             orf_start = candidates[0]
@@ -320,37 +376,62 @@ def design_mutation_primers(
             raise _PipelineError(
                 f"orf_start {orf_start} is outside sequence length {len(sequence)}."
             )
-        codon_abs = orf_start + (target_position - 1) * 3
-        if codon_abs + 3 > len(sequence):
-            raise _PipelineError(
-                f"Codon for position {target_position} extends past the end "
-                f"of the sequence (need pos {codon_abs}–{codon_abs+2}, "
-                f"sequence is {len(sequence)} bp)."
-            )
-        # Confirm original AA
-        actual_codon = sequence[codon_abs: codon_abs + 3]
-        actual_aa = str(Seq(actual_codon).translate())
-        if actual_aa != original_aa:
-            raise _PipelineError(
-                f"Position {target_position}: expected {original_aa} "
-                f"but found {actual_aa} (codon {actual_codon}). "
-                "Check orf_start and target_position."
-            )
+
+        codon_abs_list = []
+        for pos, oaa in zip(positions, original_aas):
+            codon_abs = orf_start + (pos - 1) * 3
+            if codon_abs + 3 > len(sequence):
+                raise _PipelineError(
+                    f"Codon for position {pos} extends past the end "
+                    f"of the sequence (need pos {codon_abs}–{codon_abs+2}, "
+                    f"sequence is {len(sequence)} bp)."
+                )
+            actual_codon = sequence[codon_abs: codon_abs + 3]
+            actual_aa = str(Seq(actual_codon).translate())
+            if actual_aa != oaa:
+                raise _PipelineError(
+                    f"Position {pos}: expected {oaa} "
+                    f"but found {actual_aa} (codon {actual_codon}). "
+                    "Check orf_start and target_position."
+                )
+            codon_abs_list.append(codon_abs)
 
         result.orf_start_detected = orf_start
 
-        # ── Part 1: codon mutation ────────────────────────────────────────────
-        try:
-            mutated_seq, changed_pos, orig_codon, new_codon = find_codon_and_mutate(
-                sequence, orf_start, target_position, new_aa
-            )
-        except ValueError as exc:
-            raise _PipelineError(f"Codon mutation failed: {exc}") from exc
+        # ── Part 1: codon mutation (applied sequentially for each position;
+        #    substitutions preserve length, so earlier positions' absolute
+        #    offsets remain valid for later ones) ─────────────────────────────
+        mutated_seq = sequence
+        orig_codons: list[str] = []
+        new_codons_list: list[str] = []
+        changed_pos: list[int] = []
+        for pos, naa in zip(positions, new_aas):
+            try:
+                mutated_seq, cp, oc, nc = find_codon_and_mutate(
+                    mutated_seq, orf_start, pos, naa
+                )
+            except ValueError as exc:
+                raise _PipelineError(f"Codon mutation failed: {exc}") from exc
+            orig_codons.append(oc)
+            new_codons_list.append(nc)
+            changed_pos.extend(cp)
+        changed_pos = sorted(changed_pos)
 
-        result.original_codon = orig_codon
-        result.new_codon = new_codon
+        # Single-mutation-only convenience aliases used further down for the
+        # "try an alternate codon" diagnostic optimization.
+        orig_codon = orig_codons[0]
+        new_codon = new_codons_list[0]
+        codon_abs = codon_abs_list[0]
+
+        result.original_codon = " / ".join(orig_codons)
+        result.new_codon = " / ".join(new_codons_list)
+        result.original_codons = orig_codons
+        result.new_codons = new_codons_list
+        result.mutation_positions = positions
+        result.original_aas = original_aas
+        result.new_aas = new_aas
         result.changed_positions = changed_pos
-        result.mutation_nt_position = changed_pos[0] if changed_pos else codon_abs
+        result.mutation_nt_position = changed_pos[0] if changed_pos else codon_abs_list[0]
 
         # ── Part 3: find diagnostic restriction site ──────────────────────────
         diff = gained_lost_sites(sequence, mutated_seq)
@@ -389,15 +470,19 @@ def design_mutation_primers(
             diagnostic = DiagnosticInfo(
                 enzyme=enz, effect="lost", source="mutation"
             )
-        else:
+        elif not is_multi:
             # Protocol step 1a: "change the nucleotide again" — before
             # resorting to an adjacent-codon silent mutation, try OTHER
             # codons that still encode the same target amino acid (there is
             # often more than one, and the fewest-change pick above isn't
             # necessarily the one that creates/destroys a usable site).
-            for alt_codon in ranked_codon_options(orig_codon, new_aa):
+            # Only attempted for a single mutation — combinatorially trying
+            # alternate codons at every position of a multi-mutation design
+            # isn't worth the complexity; multi-mutation designs fall
+            # straight through to the adjacent-codon silent search below.
+            for alt_codon in ranked_codon_options(orig_codon, new_aas[0]):
                 alt_seq, alt_changed_pos, _, _ = apply_codon(
-                    sequence, orf_start, target_position, alt_codon
+                    sequence, orf_start, positions[0], alt_codon
                 )
                 alt_diff = gained_lost_sites(sequence, alt_seq)
                 alt_after = scan_sites(alt_seq)
@@ -416,6 +501,7 @@ def design_mutation_primers(
                     working_seq = mutated_seq
                     after_sites = alt_after
                     result.new_codon = new_codon
+                    result.new_codons = [new_codon]
                     result.changed_positions = changed_pos
                     result.mutation_nt_position = changed_pos[0] if changed_pos else codon_abs
                     if alt_clean_gained:
@@ -427,7 +513,7 @@ def design_mutation_primers(
                             enzyme=alt_clean_lost[0], effect="lost", source="mutation"
                         )
                     result.warnings.append(
-                        f"Used alternate codon {new_codon} for {new_aa} (instead of "
+                        f"Used alternate codon {new_codon} for {new_aas[0]} (instead of "
                         f"the fewest-change option) to obtain a clean diagnostic "
                         f"site ({diagnostic.enzyme})."
                     )
@@ -441,9 +527,11 @@ def design_mutation_primers(
             silent_hits: list = []
             flank = silent_window_flank
             searched_flank = flank
+            span_start = min(codon_abs_list)
+            span_end   = max(c + 3 for c in codon_abs_list)
             while flank <= max_silent_search_flank:
-                near = codon_abs - flank
-                far  = codon_abs + 3 + flank
+                near = span_start - flank
+                far  = span_end + flank
                 silent_hits = find_silent_restriction_sites(
                     mutated_seq, orf_start, max(0, near), min(len(mutated_seq), far)
                 )
@@ -512,6 +600,7 @@ def design_mutation_primers(
                 )
 
         result.diagnostic = diagnostic
+        result.mutated_sequence = working_seq
 
         # ── Part 4: B/C primers ───────────────────────────────────────────────
         try:
@@ -670,11 +759,11 @@ def design_mutation_primers(
                     original_seq=sequence,
                     mutated_seq=working_seq,
                     orf_start=orf_start,
-                    aa_position=target_position,
-                    original_aa=original_aa,
-                    new_aa=new_aa,
-                    original_codon=orig_codon,
-                    new_codon=new_codon,
+                    aa_position=positions,
+                    original_aa=original_aas,
+                    new_aa=new_aas,
+                    original_codon=result.original_codon,
+                    new_codon=result.new_codon,
                     changed_positions=changed_pos,
                     bc=bc,
                     result_a=result_a,
@@ -683,6 +772,7 @@ def design_mutation_primers(
                     diagnostic_expected_present=(
                         diagnostic.effect == "gained" if diagnostic else True
                     ),
+                    mutation_label=mutation_label,
                 )
             except Exception as exc:
                 raise _PipelineError(f"Verification failed: {exc}") from exc
@@ -757,6 +847,14 @@ def result_to_dict(r: PipelineResult) -> dict[str, Any]:
         orf_start=r.orf_start_detected,
         mutation_nt_position=r.mutation_nt_position,
         changed_positions=r.changed_positions,
+        mutations=[
+            dict(position=p, original_aa=oa, new_aa=na, original_codon=oc, new_codon=nc)
+            for p, oa, na, oc, nc in zip(
+                r.mutation_positions, r.original_aas, r.new_aas,
+                r.original_codons, r.new_codons,
+            )
+        ],
+        mutated_sequence=r.mutated_sequence,
         primers=dict(
             A=_primer(r.primer_A),
             B=_primer(r.primer_B),

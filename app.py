@@ -10,13 +10,18 @@ pipeline.py / primer_bc.py / primer_ad.py / assembly.py / restriction_utils.py
 """
 
 import io
+import tempfile
 
 import streamlit as st
 from Bio import SeqIO
 from Bio.Seq import Seq
 
-from pipeline import design_mutation_primers, find_all_positions, parse_mutation_label
+from pipeline import (
+    design_mutation_primers, find_all_positions, parse_mutation_label, parse_mutation_labels,
+)
 from primer_ad import NEB_CATALOG
+from assembly import translate_orf
+from xdna_utils import read_xdna_sequence
 
 st.set_page_config(page_title="Gibson Primer Designer", layout="wide")
 
@@ -131,6 +136,36 @@ def _read_fasta_text(text: str) -> str | None:
     return seq
 
 
+def _read_xdna_upload(upload) -> str | None:
+    """
+    Extract a sequence from an uploaded .xdna file. This format has no
+    public spec — read_xdna_sequence heuristically finds the longest
+    DNA-like byte run, so the result is shown for the user to sanity-check
+    (same caveat the CLI's --xdna path prints).
+    """
+    with tempfile.NamedTemporaryFile(suffix=".xdna", delete=False) as tmp:
+        tmp.write(upload.getvalue())
+        tmp_path = tmp.name
+    try:
+        result = read_xdna_sequence(tmp_path)
+    except ValueError as exc:
+        st.error(
+            f"Could not read .xdna file: {exc}\n\n"
+            "Safer alternative: open the file in SnapGene / Serial Cloner / "
+            "ApE and export it as FASTA instead."
+        )
+        return None
+    st.warning(
+        f".xdna has no public file spec — please double-check this against your "
+        f"sequence viewer before ordering primers.\n\n"
+        f"Extracted {result.length} bp from a {result.file_size}-byte file"
+        + (f" ({result.candidate_runs_found} DNA-like runs found; used the longest)."
+           if result.candidate_runs_found > 1 else ".")
+        + f"\n\nFirst 60bp: `{result.preview_start}`\n\nLast 60bp: `{result.preview_end}`"
+    )
+    return result.sequence
+
+
 def _find_orf_candidates(sequence: str, top_n: int = 8, min_aa: int = 20):
     orfs = []
     pos = 0
@@ -208,13 +243,17 @@ st.markdown(
 
 with st.sidebar:
     st.markdown('<div class="section-label">Sequence</div>', unsafe_allow_html=True)
-    upload = st.file_uploader("FASTA file", type=["fasta", "fa", "txt"], label_visibility="collapsed")
+    upload = st.file_uploader("Sequence file", type=["fasta", "fa", "txt", "xdna"],
+                               label_visibility="collapsed")
     pasted = st.text_area("Or paste FASTA text", height=140,
                            placeholder=">construct\nATGGCT...", label_visibility="collapsed")
 
     sequence = None
     if upload is not None:
-        sequence = _read_fasta_text(upload.getvalue().decode("utf-8", errors="replace"))
+        if upload.name.lower().endswith(".xdna"):
+            sequence = _read_xdna_upload(upload)
+        else:
+            sequence = _read_fasta_text(upload.getvalue().decode("utf-8", errors="replace"))
     elif pasted.strip():
         sequence = _read_fasta_text(pasted)
 
@@ -263,6 +302,73 @@ mode = st.radio("Mode", ["Design a mutation", "Scan for designable positions"],
 st.write("")
 
 
+def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
+    """Wrap each [start, end) span in seq with [ ]. spans may be unsorted/adjacent."""
+    out = seq
+    for start, end in sorted(spans, key=lambda s: -s[0]):
+        out = out[:start] + "[" + out[start:end] + "]" + out[end:]
+    return out
+
+
+def _render_mutated_region(result, aa_flank: int = 15):
+    """Show the mutated ORF's DNA + protein for a window around the
+    mutation(s), with the changed codon(s)/residue(s) bracketed."""
+    if not result.mutated_sequence or not result.mutation_positions:
+        return
+
+    orf_start = result.orf_start_detected
+    mutated_seq = result.mutated_sequence
+    positions = result.mutation_positions
+
+    try:
+        protein = translate_orf(mutated_seq, orf_start)
+    except ValueError:
+        return
+    if not protein:
+        return
+
+    aa_min, aa_max = min(positions), max(positions)
+    win_start = max(1, aa_min - aa_flank)
+    win_end = min(len(protein), aa_max + aa_flank)
+
+    dna_start = orf_start + (win_start - 1) * 3
+    dna_end = orf_start + win_end * 3
+    dna_window = mutated_seq[dna_start:dna_end]
+    protein_window = protein[win_start - 1: win_end]
+
+    codon_spans = [
+        ((pos - win_start) * 3, (pos - win_start) * 3 + 3)
+        for pos in positions if win_start <= pos <= win_end
+    ]
+    residue_spans = [
+        (pos - win_start, pos - win_start + 1)
+        for pos in positions if win_start <= pos <= win_end
+    ]
+
+    dna_marked = _bracket_spans(dna_window, codon_spans).replace(
+        "[", '<span style="color:#c0392b;font-weight:700;">['
+    ).replace("]", ']</span>')
+    protein_marked = _bracket_spans(protein_window, residue_spans).replace(
+        "[", '<span style="color:#c0392b;font-weight:700;">['
+    ).replace("]", ']</span>')
+
+    st.markdown(
+        f'<div class="section-label">Mutated region (aa {win_start}-{win_end})</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="result-card">'
+        f'<div class="kv-row"><span class="kv-label">DNA</span>'
+        f'<span class="kv-value" style="font-family:monospace;word-break:break-all;">'
+        f"5'-{dna_marked}-3'</span></div>"
+        f'<div class="kv-row"><span class="kv-label">Protein</span>'
+        f'<span class="kv-value" style="font-family:monospace;word-break:break-all;">'
+        f'{protein_marked}</span></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_result(result, key_prefix=""):
     if result.errors:
         for e in result.errors:
@@ -292,6 +398,8 @@ def _render_result(result, key_prefix=""):
         for label, value in kv
     )
     st.markdown(f'<div class="result-card">{rows_html}</div>', unsafe_allow_html=True)
+
+    _render_mutated_region(result)
 
     st.markdown('<div class="section-label">Primers (5\' → 3\')</div>', unsafe_allow_html=True)
     rows = []
@@ -374,19 +482,24 @@ def _render_result(result, key_prefix=""):
 
 
 if mode == "Design a mutation":
-    label = st.text_input("Mutation", placeholder="e.g. K255E", label_visibility="collapsed")
+    label = st.text_input(
+        "Mutation", placeholder="e.g. K255E, or K255E+R300A for a combined double mutation",
+        label_visibility="collapsed",
+    )
+    st.caption("Join two mutations with \"+\" to design one primer set for both "
+               "(only realistic when the positions are close together).")
     if st.button("Design primers", type="primary") and label:
         try:
-            orig_aa, position, new_aa = parse_mutation_label(label)
+            mutations = parse_mutation_labels(label)
         except ValueError as exc:
             st.error(str(exc))
         else:
             with st.spinner("Designing primers…"):
                 result = design_mutation_primers(
                     sequence=sequence,
-                    target_position=position,
-                    original_aa=orig_aa,
-                    new_aa=new_aa,
+                    target_position=[p for _, p, _ in mutations],
+                    original_aa=[oa for oa, _, _ in mutations],
+                    new_aa=[na for _, _, na in mutations],
                     orf_start=int(orf_start),
                     tm_range=(tm_min, tm_max),
                     window_bp=(int(win_near), int(win_far)),

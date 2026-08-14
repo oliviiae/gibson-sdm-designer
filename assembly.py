@@ -114,12 +114,16 @@ def translate_orf(seq: str, orf_start: int) -> str:
 @dataclass
 class MutationCheck:
     passed: bool
-    aa_position: int          # 1-based
-    expected_aa: str
-    observed_aa: str
+    aa_position: int          # 1-based (first mutation, for backward compat)
+    expected_aa: str          # (first mutation, for backward compat)
+    observed_aa: str          # (first mutation, for backward compat)
     extra_changes: list[tuple[int, str, str]] = field(default_factory=list)
     # extra_changes: list of (1-based position, original_aa, new_aa)
     message: str = ""
+    # per_mutation: full detail for every intended mutation (length 1 for a
+    # single-mutation check, length N for a combined multi-mutation check).
+    # Each entry: (1-based position, expected_aa, observed_aa, passed)
+    per_mutation: list[tuple[int, str, str, bool]] = field(default_factory=list)
 
 
 @dataclass
@@ -177,79 +181,96 @@ def verify_mutation(
     assembled_seq: str,
     orf_start_in_original: int,
     orf_start_in_assembled: int,
-    aa_position: int,
-    original_aa: str,
-    new_aa: str,
+    aa_position: int | list[int],
+    original_aa: str | list[str],
+    new_aa: str | list[str],
 ) -> MutationCheck:
     """
     Translate both sequences and compare their proteins.
 
+    aa_position/original_aa/new_aa each accept either a single scalar (one
+    mutation) or equal-length lists (a combined multi-mutation design, e.g.
+    a double mutation sharing one primer set). original_aa is accepted for
+    API symmetry with the rest of the pipeline but isn't itself used here —
+    the WT protein already encodes it, so it's implicitly checked via the
+    "no unexpected changes" scan below.
+
     Returns a MutationCheck with:
-      - passed = True iff aa_position changed to new_aa AND no other positions differ
+      - passed = True iff every position changed to its expected new_aa AND
+        no other positions differ
       - extra_changes = list of (pos, old_aa, new_aa) for unexpected differences
+      - per_mutation = per-position (pos, expected, observed, passed) detail
     """
+    positions = list(aa_position) if isinstance(aa_position, (list, tuple)) else [aa_position]
+    new_aas   = list(new_aa)      if isinstance(new_aa, (list, tuple))      else [new_aa]
+    if len(positions) != len(new_aas):
+        raise ValueError(
+            f"aa_position and new_aa must be the same length "
+            f"({len(positions)} vs {len(new_aas)})."
+        )
+    new_aas = [a.upper() for a in new_aas]
+
     wt_protein  = translate_orf(original_seq,  orf_start_in_original)
     mut_protein = translate_orf(assembled_seq, orf_start_in_assembled)
 
-    aa_idx = aa_position - 1   # 0-based
-    new_aa = new_aa.upper()
-
-    if new_aa == "*":
-        # A nonsense (stop-codon) mutation is verified differently: translate_orf
-        # always strips the stop codon itself from its return value, so mut_protein
-        # can never literally contain '*' at aa_idx — the correct signal instead is
-        # that translation terminates exactly one residue short of aa_position
-        # (i.e. mut_protein has exactly aa_idx residues).
-        if len(mut_protein) == aa_idx:
-            observed = "*"
-            target_ok = True
-        elif len(mut_protein) > aa_idx:
-            observed = mut_protein[aa_idx]
-            target_ok = False
+    per_mutation: list[tuple[int, str, str, bool]] = []
+    for pos, exp_aa in zip(positions, new_aas):
+        aa_idx = pos - 1   # 0-based
+        if exp_aa == "*":
+            # A nonsense (stop-codon) mutation is verified differently:
+            # translate_orf always strips the stop codon itself from its
+            # return value, so mut_protein can never literally contain '*'
+            # at aa_idx — the correct signal instead is that translation
+            # terminates exactly one residue short of this position.
+            if len(mut_protein) == aa_idx:
+                observed, ok = "*", True
+            elif len(mut_protein) > aa_idx:
+                observed, ok = mut_protein[aa_idx], False
+            else:
+                observed, ok = "?", False
         else:
-            observed = "?"
-            target_ok = False
-    else:
-        # Observed amino acid at the target position
-        if aa_idx >= len(mut_protein):
-            return MutationCheck(
-                passed=False,
-                aa_position=aa_position,
-                expected_aa=new_aa,
-                observed_aa="?",
-                message=f"ORF too short: translated length {len(mut_protein)} < aa_position {aa_position}",
-            )
-        observed = mut_protein[aa_idx]
-        target_ok = observed == new_aa
+            if aa_idx >= len(mut_protein):
+                observed, ok = "?", False
+            else:
+                observed = mut_protein[aa_idx]
+                ok = observed == exp_aa
+        per_mutation.append((pos, exp_aa, observed, ok))
 
-    # Scan for any other differences (only over the region actually present in
-    # both proteins — for a stop mutation, mut_protein simply ends earlier, so
-    # zip() naturally limits the comparison to before the truncation point).
+    target_ok = all(ok for _, _, _, ok in per_mutation)
+    mutated_positions = {pos for pos, _, _, _ in per_mutation}
+
+    # Scan for any other differences, over the region actually present in
+    # both proteins — for a stop mutation, mut_protein simply ends earlier,
+    # so this naturally limits the comparison to before the truncation point.
+    compare_len = min(len(wt_protein), len(mut_protein))
     extra: list[tuple[int, str, str]] = []
-    for i, (wt, mt) in enumerate(zip(wt_protein, mut_protein), start=1):
-        if i == aa_position:
+    for i in range(1, compare_len + 1):
+        if i in mutated_positions:
             continue
+        wt, mt = wt_protein[i - 1], mut_protein[i - 1]
         if wt != mt:
             extra.append((i, wt, mt))
 
     passed = target_ok and len(extra) == 0
     parts = []
-    if not target_ok:
-        parts.append(
-            f"Position {aa_position}: expected {new_aa}, observed {observed}"
-        )
+    for pos, exp_aa, observed, ok in per_mutation:
+        if not ok:
+            parts.append(f"Position {pos}: expected {exp_aa}, observed {observed}")
     if extra:
         parts.append(
             "Unexpected AA changes: " +
             ", ".join(f"{wt}{pos}{mt}" for pos, wt, mt in extra)
         )
+
+    first_pos, first_exp, first_obs, _ = per_mutation[0]
     return MutationCheck(
         passed=passed,
-        aa_position=aa_position,
-        expected_aa=new_aa,
-        observed_aa=observed,
+        aa_position=first_pos,
+        expected_aa=first_exp,
+        observed_aa=first_obs,
         extra_changes=extra,
         message="OK" if passed else "; ".join(parts),
+        per_mutation=per_mutation,
     )
 
 
@@ -314,9 +335,9 @@ def run_full_verification(
     original_seq: str,
     mutated_seq: str,
     orf_start: int,
-    aa_position: int,
-    original_aa: str,
-    new_aa: str,
+    aa_position: int | list[int],
+    original_aa: str | list[str],
+    new_aa: str | list[str],
     original_codon: str,
     new_codon: str,
     changed_positions: list[int],
@@ -325,9 +346,13 @@ def run_full_verification(
     result_d,       # FlankingPrimerResult from primer_ad
     diagnostic_enzyme: str | None = None,
     diagnostic_expected_present: bool = True,
+    mutation_label: str | None = None,
 ) -> VerificationReport:
     """
     Run the full Part-6 verification pipeline.
+
+    aa_position/original_aa/new_aa accept either scalars (one mutation) or
+    equal-length lists (a combined multi-mutation design).
 
     Parameters
     ----------
@@ -336,6 +361,9 @@ def run_full_verification(
     diagnostic_expected_present: True if the site should be GAINED by the
                                  mutation (present in assembled, absent in WT);
                                  False if it should be LOST.
+    mutation_label              : precomputed display label; if omitted, one
+                                 is built from original_aa+aa_position+new_aa
+                                 (joined with " + " for multiple mutations).
     """
     top_a = result_a.top
     top_d = result_d.top
@@ -386,8 +414,16 @@ def run_full_verification(
             assembled, diagnostic_enzyme, diagnostic_expected_present
         )
 
+    if mutation_label is None:
+        _positions = aa_position if isinstance(aa_position, (list, tuple)) else [aa_position]
+        _origs     = original_aa if isinstance(original_aa, (list, tuple)) else [original_aa]
+        _news      = new_aa      if isinstance(new_aa, (list, tuple))      else [new_aa]
+        mutation_label = " + ".join(
+            f"{oa}{p}{na}" for p, oa, na in zip(_positions, _origs, _news)
+        )
+
     return VerificationReport(
-        mutation_label=f"{original_aa}{aa_position}{new_aa}",
+        mutation_label=mutation_label,
         original_codon=original_codon,
         new_codon=new_codon,
         changed_positions=changed_positions,
@@ -468,9 +504,9 @@ def print_report(report: VerificationReport) -> None:
     mc = report.mutation_check
     status = _status(mc.passed)
     print(f"  Translation check          {status:>10}")
-    print(f"    Position {mc.aa_position}: "
-          f"{mc.expected_aa if mc.passed else '?'} observed  "
-          f"(expected {mc.expected_aa})")
+    for pos, exp_aa, observed, ok in mc.per_mutation:
+        print(f"    Position {pos}: {observed} observed  "
+              f"(expected {exp_aa}){'' if ok else '  ✗ MISMATCH'}")
     if mc.extra_changes:
         print(f"    Unexpected changes:")
         for pos, wt, mt in mc.extra_changes:
