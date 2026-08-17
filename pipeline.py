@@ -408,6 +408,17 @@ def design_mutation_primers(
             if pos < 1:
                 raise _PipelineError("target_position must be ≥ 1.")
 
+        # Protocol's stated minimum B/C overlap length is a hard floor, not a
+        # suggestion — enforced here (not just documented) so no caller,
+        # including a user-supplied --min-overlap below 16, can silently
+        # produce an out-of-spec overlap.
+        if min_overlap < 16:
+            result.warnings.append(
+                f"min_overlap={min_overlap} is below the protocol's minimum "
+                f"of 16bp — raised to 16."
+            )
+            min_overlap = 16
+
         if orf_start is None:
             if is_multi:
                 raise _PipelineError(
