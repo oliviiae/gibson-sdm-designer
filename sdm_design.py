@@ -454,6 +454,21 @@ def _print_formatted(result, show_all_candidates: bool):
               f"({len(result.mutated_sequence)} bp)")
         _print_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="full construct")
 
+    # Full restriction digest map — every enzyme's cut site anywhere in the
+    # construct, not just primer A/D/diagnostic. Useful for planning any
+    # other digest, not only the one this design's verification relies on.
+    if result.mutated_sequence:
+        full_map = scan_sites(result.mutated_sequence)
+        all_cuts = [
+            (pos, enz) for enz, positions in full_map.items() for pos in positions
+        ]
+        if all_cuts:
+            print(f"\n  {_hr()}")
+            print(f"  Full restriction digest map  "
+                  f"({len(all_cuts)} sites, {len(full_map)} enzymes, "
+                  f"{len(result.mutated_sequence)} bp)")
+            _print_seq_with_cuts(result.mutated_sequence, 0, all_cuts, unit="full construct")
+
     # PCR products (sizes + sequences, with cut sites marked)
     if result.frag_ad_bp:
         print(f"\n  {_hr()}")

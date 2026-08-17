@@ -589,6 +589,18 @@ def _render_result(result, key_prefix=""):
         ):
             _render_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="the full construct")
 
+    if result.mutated_sequence:
+        full_map = scan_sites(result.mutated_sequence)
+        all_cuts = [
+            (pos, enz) for enz, positions in full_map.items() for pos in positions
+        ]
+        if all_cuts:
+            with st.expander(
+                f"Show full restriction digest map ({len(all_cuts)} sites, "
+                f"{len(full_map)} enzymes)"
+            ):
+                _render_seq_with_cuts(result.mutated_sequence, 0, all_cuts, unit="the full construct")
+
     if result.frag_ad_bp:
         with st.expander("Show PCR product sequences (cut sites marked)"):
             pa, pd = result.primer_A, result.primer_D
