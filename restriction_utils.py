@@ -16,11 +16,17 @@ from Bio.Restriction import RestrictionBatch, Analysis, CommOnly
 from Bio.Seq import Seq
 
 
-# Use commercially-available enzymes with 6–8 bp recognition sequences
+# Use NEB-supplied enzymes with 6–8 bp recognition sequences only. Any
+# restriction site reported here (in particular a diagnostic site gained or
+# lost by a mutation) must be an enzyme a lab can actually order from New
+# England Biolabs — Biopython's per-enzyme supplier_list() carries this
+# directly from REBASE, so it's checked against real catalog data rather
+# than a hand-maintained enzyme list.
 def _make_batch() -> RestrictionBatch:
     rb = RestrictionBatch(CommOnly)
     return RestrictionBatch(
-        [e for e in rb if 6 <= len(e.site) <= 8]
+        [e for e in rb if 6 <= len(e.site) <= 8
+         and "New England Biolabs" in e.supplier_list()]
     )
 
 

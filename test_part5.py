@@ -102,9 +102,18 @@ def test_unique_sites_in_window():
     for name, pos in list(d_sites.items())[:5]:
         print(f"    {name}: cut at 0-based {pos[0]}")
 
-    # Every returned site must be unique in the full sequence
-    from restriction_utils import scan_sites
-    full_map = scan_sites(mutated_seq)
+    # Every returned site must be unique in the full sequence. Cross-check
+    # against primer_ad's own enzyme batch (not restriction_utils.scan_sites,
+    # which is now filtered to NEB-only enzymes for diagnostic-site
+    # selection and is a narrower set than primer_ad's A/D candidate pool).
+    from Bio.Restriction import Analysis
+    from Bio.Seq import Seq as _Seq
+    from primer_ad import _BATCH as _ad_batch
+    full_map = {
+        str(enz): positions
+        for enz, positions in Analysis(_ad_batch, _Seq(mutated_seq), linear=True).full().items()
+        if positions
+    }
     for name, pos_list in {**a_sites, **d_sites}.items():
         assert len(full_map.get(name, [])) == 1, \
             f"{name} is not unique in full sequence"
