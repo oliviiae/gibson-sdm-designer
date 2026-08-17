@@ -651,11 +651,6 @@ if mode == "Design a mutation":
                "(only realistic when the positions are close together).")
 
     with st.expander("Use your own primer A/D sequences (optional)"):
-        st.caption(
-            "Skips the restriction-site search for whichever side you fill "
-            "in — the sequence is located directly in the construct (as "
-            "given, or as its reverse complement) and used as-is."
-        )
         col_a, col_d = st.columns(2)
         primer_a_input = col_a.text_input("Primer A sequence", key="primer_a_input")
         primer_d_input = col_d.text_input("Primer D sequence", key="primer_d_input")
