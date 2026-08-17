@@ -22,7 +22,8 @@ from Bio.Seq import Seq
 
 from codon_utils import find_codon_and_mutate, ranked_codon_options, apply_codon
 from primer_bc import design_bc_primers, PrimerBCResult
-from primer_ad import design_ad_primers, FlankingPrimerResult, PREFERRED_ENZYMES
+from primer_ad import design_ad_primers, FlankingPrimerResult, CandidateSite, PREFERRED_ENZYMES
+from tm_utils import simple_tm
 from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites, count_sites
 from assembly import (
     assemble_product,
@@ -245,6 +246,51 @@ class _PipelineError(Exception):
     """Raised internally to abort the pipeline on a fatal error."""
 
 
+def _locate_user_primer(working_seq: str, primer_seq: str, label: str) -> tuple[int, int, str]:
+    """
+    Find a user-supplied primer A/D sequence within working_seq.
+
+    Tries the sequence as given first (matches how the tool stores an
+    auto-designed primer A/D: a literal sense-strand substring), then its
+    reverse complement (since a real D primer is normally ordered as the
+    antisense oligo, and a user might paste it that way). Tm is orientation-
+    invariant (a sequence and its reverse complement have identical G/C and
+    A/T counts under the Wallace rule), so either match is equally valid —
+    only the located span in working_seq matters downstream.
+
+    Returns (start, end, seq_as_stored) — seq_as_stored is the literal
+    substring of working_seq at [start, end), for consistency with how
+    auto-designed primers are represented internally.
+    """
+    primer_seq = primer_seq.upper().strip()
+    if not primer_seq:
+        raise _PipelineError(f"Primer {label}: an empty sequence was supplied.")
+
+    revcomp = str(Seq(primer_seq).reverse_complement())
+    fwd_count = working_seq.count(primer_seq)
+    rev_count = working_seq.count(revcomp) if revcomp != primer_seq else 0
+
+    if fwd_count + rev_count == 0:
+        raise _PipelineError(
+            f"Primer {label} sequence not found in the construct — checked "
+            f"both as given and as its reverse complement. Double-check it "
+            f"was copied correctly and matches this sequence."
+        )
+    if fwd_count + rev_count > 1:
+        raise _PipelineError(
+            f"Primer {label} sequence is ambiguous — it (or its reverse "
+            f"complement) appears {fwd_count + rev_count} times in the "
+            f"construct. Supply a longer, unique primer sequence."
+        )
+
+    if fwd_count == 1:
+        start = working_seq.index(primer_seq)
+        return start, start + len(primer_seq), primer_seq
+    else:
+        start = working_seq.index(revcomp)
+        return start, start + len(revcomp), revcomp
+
+
 def _silent_mutation_seq(
     seq: str,
     codon_abs: int,
@@ -273,6 +319,8 @@ def design_mutation_primers(
     silent_window_flank: int = 9,
     max_silent_search_flank: int = 150,
     max_ad_window_expansions: int = 3,
+    primer_A_seq: str | None = None,
+    primer_D_seq: str | None = None,
 ) -> PipelineResult:
     """
     Full Gibson primer design pipeline (Parts 1–6).
@@ -318,6 +366,13 @@ def design_mutation_primers(
                          of its span each time) if no unique flanking site
                          is found. Does NOT introduce any mutations — only
                          widens where it looks.
+    primer_A_seq/primer_D_seq: supply your own primer A and/or D sequence
+                         instead of having the tool search for a restriction
+                         site. Each is located in the construct (as given, or
+                         as its reverse complement) and used directly — the
+                         restriction-site search for that side is skipped
+                         entirely. Either or both may be supplied; any side
+                         left as None is still auto-designed as usual.
 
     Returns
     -------
@@ -688,52 +743,77 @@ def design_mutation_primers(
             )
 
         # ── Part 5: A/D primers ───────────────────────────────────────────────
-        # If no unique flanking site is found, widen the search window
-        # outward and retry (no sequence changes — just looking further away)
-        # before giving up.
+        # If the user supplied their own primer A and/or D sequence, that side
+        # is located directly and the restriction-site search is skipped for
+        # it. Any side left as None is still auto-designed as usual.
+        need_auto_a = primer_A_seq is None
+        need_auto_d = primer_D_seq is None
+
         near0, far0 = window_bp
         span = far0 - near0
         cur_window = window_bp
         result_a = result_d = None
         windows_tried = [cur_window]
 
-        for attempt in range(max_ad_window_expansions + 1):
-            try:
-                result_a, result_d = design_ad_primers(
-                    working_seq,
-                    b_start=bc.b_start,
-                    c_end=bc.c_end,
-                    tm_range=tm_range,
-                    window_bp=cur_window,
-                    target_tm=target_tm,
-                    preferred=preferred_enzymes,
+        if need_auto_a or need_auto_d:
+            # If no unique flanking site is found, widen the search window
+            # outward and retry (no sequence changes — just looking further
+            # away) before giving up.
+            for attempt in range(max_ad_window_expansions + 1):
+                try:
+                    result_a, result_d = design_ad_primers(
+                        working_seq,
+                        b_start=bc.b_start,
+                        c_end=bc.c_end,
+                        tm_range=tm_range,
+                        window_bp=cur_window,
+                        target_tm=target_tm,
+                        preferred=preferred_enzymes,
+                    )
+                except Exception as exc:
+                    raise _PipelineError(f"A/D primer design failed: {exc}") from exc
+
+                a_done = result_a.top is not None or not need_auto_a
+                d_done = result_d.top is not None or not need_auto_d
+                if a_done and d_done:
+                    break
+                if attempt == max_ad_window_expansions:
+                    break
+                cur_window = (near0, far0 + span * (attempt + 1))
+                windows_tried.append(cur_window)
+
+            if len(windows_tried) > 1 and (result_a.top or result_d.top):
+                result.warnings.append(
+                    f"Default flanking window {window_bp[0]}-{window_bp[1]} bp had no "
+                    f"unique site; widened to {cur_window[0]}-{cur_window[1]} bp to find one "
+                    f"(no sequence was changed — only the search range)."
                 )
-            except Exception as exc:
-                raise _PipelineError(f"A/D primer design failed: {exc}") from exc
-
-            if result_a.top is not None and result_d.top is not None:
-                break
-            if attempt == max_ad_window_expansions:
-                break
-            cur_window = (near0, far0 + span * (attempt + 1))
-            windows_tried.append(cur_window)
-
-        if len(windows_tried) > 1 and (result_a.top or result_d.top):
-            result.warnings.append(
-                f"Default flanking window {window_bp[0]}-{window_bp[1]} bp had no "
-                f"unique site; widened to {cur_window[0]}-{cur_window[1]} bp to find one "
-                f"(no sequence was changed — only the search range)."
-            )
 
         result.ad_result_a = result_a
         result.ad_result_d = result_d
 
-        if result_a.top is None:
+        if primer_A_seq is not None:
+            start_a, end_a, seq_a = _locate_user_primer(working_seq, primer_A_seq, "A")
+            if start_a >= bc.overlap_start:
+                raise _PipelineError(
+                    f"Primer A (located at nt {start_a}-{end_a}) does not sit "
+                    f"upstream of the B/C overlap (starts at nt {bc.overlap_start}) "
+                    "— check that this is really the upstream/forward primer."
+                )
+            result.primer_A = PrimerInfo(
+                sequence=seq_a, tm=simple_tm(seq_a), length=len(seq_a),
+                start=start_a, end=end_a,
+            )
+            result.warnings.append(
+                f"Primer A: using the supplied sequence (located at nt "
+                f"{start_a}-{end_a} in the construct, Tm={simple_tm(seq_a):.0f}°C)."
+            )
+        elif result_a.top is None:
             result.warnings.append(
                 f"No unique restriction site found for primer A even after "
                 f"widening the search window up to {cur_window[0]}-{cur_window[1]} bp "
-                "upstream. Try a longer construct, or use --window to search a "
-                "different range manually."
+                "upstream. Try a longer construct, use --window to search a "
+                "different range manually, or supply your own primer A sequence."
             )
         else:
             top_a = result_a.top
@@ -754,12 +834,28 @@ def design_mutation_primers(
                     f"normal {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
                 )
 
-        if result_d.top is None:
+        if primer_D_seq is not None:
+            start_d, end_d, seq_d = _locate_user_primer(working_seq, primer_D_seq, "D")
+            if end_d <= bc.overlap_end:
+                raise _PipelineError(
+                    f"Primer D (located at nt {start_d}-{end_d}) does not sit "
+                    f"downstream of the B/C overlap (ends at nt {bc.overlap_end}) "
+                    "— check that this is really the downstream/reverse primer."
+                )
+            result.primer_D = PrimerInfo(
+                sequence=seq_d, tm=simple_tm(seq_d), length=len(seq_d),
+                start=start_d, end=end_d,
+            )
+            result.warnings.append(
+                f"Primer D: using the supplied sequence (located at nt "
+                f"{start_d}-{end_d} in the construct, Tm={simple_tm(seq_d):.0f}°C)."
+            )
+        elif result_d.top is None:
             result.warnings.append(
                 f"No unique restriction site found for primer D even after "
                 f"widening the search window up to {cur_window[0]}-{cur_window[1]} bp "
-                "downstream. Try a longer construct, or use --window to search a "
-                "different range manually."
+                "downstream. Try a longer construct, use --window to search a "
+                "different range manually, or supply your own primer D sequence."
             )
         else:
             top_d = result_d.top
@@ -779,6 +875,32 @@ def design_mutation_primers(
                     f"its 3' end is A/T — no length at this site hit the "
                     f"normal {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
                 )
+
+        if primer_A_seq is not None:
+            cand_a = CandidateSite(
+                enzyme="(user-supplied)", cut_pos=0, cut_pos_0=0,
+                primer_seq=result.primer_A.sequence,
+                primer_start=result.primer_A.start, primer_end=result.primer_A.end,
+                primer_tm=result.primer_A.tm, tm_dist=0.0,
+            )
+            result_a = FlankingPrimerResult(
+                label="A", window_start=result.primer_A.start,
+                window_end=result.primer_A.end, candidates=[cand_a],
+            )
+            result.ad_result_a = result_a
+
+        if primer_D_seq is not None:
+            cand_d = CandidateSite(
+                enzyme="(user-supplied)", cut_pos=0, cut_pos_0=0,
+                primer_seq=result.primer_D.sequence,
+                primer_start=result.primer_D.start, primer_end=result.primer_D.end,
+                primer_tm=result.primer_D.tm, tm_dist=0.0,
+            )
+            result_d = FlankingPrimerResult(
+                label="D", window_start=result.primer_D.start,
+                window_end=result.primer_D.end, candidates=[cand_d],
+            )
+            result.ad_result_d = result_d
 
         # ── Part 6: assembly and verification ─────────────────────────────────
         if result.primer_A is None or result.primer_D is None:

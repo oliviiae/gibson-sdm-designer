@@ -543,8 +543,9 @@ def _render_result(result, key_prefix=""):
     rows = []
     if result.primer_A:
         pa = result.primer_A
-        rows.append(["A", pa.sequence, f"{pa.tm:.0f}°C",
-                     f"{pa.enzyme}  ·  {_neb_tag(pa.enzyme)}  ·  cut {pa.cut_pos}"])
+        note = "user-supplied" if pa.enzyme is None else \
+               f"{pa.enzyme}  ·  {_neb_tag(pa.enzyme)}  ·  cut {pa.cut_pos}"
+        rows.append(["A", pa.sequence, f"{pa.tm:.0f}°C", note])
     if result.primer_B:
         pb = result.primer_B
         rows.append(["B", pb.sequence, f"{pb.tm:.0f}°C", "sense (forward)"])
@@ -555,8 +556,9 @@ def _render_result(result, key_prefix=""):
                      "antisense (reverse)"])
     if result.primer_D:
         pd = result.primer_D
-        rows.append(["D", pd.sequence, f"{pd.tm:.0f}°C",
-                     f"{pd.enzyme}  ·  {_neb_tag(pd.enzyme)}  ·  cut {pd.cut_pos}"])
+        note = "user-supplied" if pd.enzyme is None else \
+               f"{pd.enzyme}  ·  {_neb_tag(pd.enzyme)}  ·  cut {pd.cut_pos}"
+        rows.append(["D", pd.sequence, f"{pd.tm:.0f}°C", note])
     st.dataframe(
         {"Primer": [r[0] for r in rows],
          "Sequence": [r[1] for r in rows],
@@ -647,6 +649,17 @@ if mode == "Design a mutation":
     )
     st.caption("Join two mutations with \"+\" to design one primer set for both "
                "(only realistic when the positions are close together).")
+
+    with st.expander("Use your own primer A/D sequences (optional)"):
+        st.caption(
+            "Skips the restriction-site search for whichever side you fill "
+            "in — the sequence is located directly in the construct (as "
+            "given, or as its reverse complement) and used as-is."
+        )
+        col_a, col_d = st.columns(2)
+        primer_a_input = col_a.text_input("Primer A sequence", key="primer_a_input")
+        primer_d_input = col_d.text_input("Primer D sequence", key="primer_d_input")
+
     if st.button("Design primers", type="primary") and label:
         try:
             mutations = parse_mutation_labels(label)
@@ -662,6 +675,8 @@ if mode == "Design a mutation":
                     orf_start=int(orf_start),
                     tm_range=(tm_min, tm_max),
                     window_bp=(int(win_near), int(win_far)),
+                    primer_A_seq=primer_a_input.strip() or None,
+                    primer_D_seq=primer_d_input.strip() or None,
                 )
             _render_result(result)
 

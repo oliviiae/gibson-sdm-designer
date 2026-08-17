@@ -114,6 +114,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         "annealing Tm warning and can make it worse; it's "
                         "mainly useful if you want a longer/stronger overlap "
                         "for its own sake.")
+    p.add_argument("--primer-a-seq", metavar="SEQ", default=None,
+                   help="Use your own primer A sequence instead of having the "
+                        "tool search for a restriction site. Located in the "
+                        "construct as given or as its reverse complement.")
+    p.add_argument("--primer-d-seq", metavar="SEQ", default=None,
+                   help="Use your own primer D sequence instead of having the "
+                        "tool search for a restriction site. Located in the "
+                        "construct as given or as its reverse complement.")
     p.add_argument("--json", action="store_true",
                    help="Output results as JSON.")
     p.add_argument("--all-candidates", action="store_true",
@@ -394,12 +402,15 @@ def _print_formatted(result, show_all_candidates: bool):
 
     if result.primer_A:
         pa = result.primer_A
-        neb = NEB_CATALOG.get(pa.enzyme or "", {})
-        neb_tag = f"NEB {neb['hf'] or neb['cat']} (HF)" if neb.get("hf") else \
-                  (f"NEB {neb['cat']}" if neb else "")
-        warn_tag = f"  ⚠ {neb['note']}" if neb.get("note") else ""
-        _prow("A", pa.sequence, pa.tm,
-              f"[{pa.enzyme}  {neb_tag}  cut {pa.cut_pos}]{warn_tag}")
+        if pa.enzyme is None:
+            _prow("A", pa.sequence, pa.tm, "[user-supplied]")
+        else:
+            neb = NEB_CATALOG.get(pa.enzyme or "", {})
+            neb_tag = f"NEB {neb['hf'] or neb['cat']} (HF)" if neb.get("hf") else \
+                      (f"NEB {neb['cat']}" if neb else "")
+            warn_tag = f"  ⚠ {neb['note']}" if neb.get("note") else ""
+            _prow("A", pa.sequence, pa.tm,
+                  f"[{pa.enzyme}  {neb_tag}  cut {pa.cut_pos}]{warn_tag}")
     else:
         print("    A  (not found)")
 
@@ -415,12 +426,15 @@ def _print_formatted(result, show_all_candidates: bool):
 
     if result.primer_D:
         pd = result.primer_D
-        neb = NEB_CATALOG.get(pd.enzyme or "", {})
-        neb_tag = f"NEB {neb['hf'] or neb['cat']} (HF)" if neb.get("hf") else \
-                  (f"NEB {neb['cat']}" if neb else "")
-        warn_tag = f"  ⚠ {neb['note']}" if neb.get("note") else ""
-        _prow("D", pd.sequence, pd.tm,
-              f"[{pd.enzyme}  {neb_tag}  cut {pd.cut_pos}]{warn_tag}")
+        if pd.enzyme is None:
+            _prow("D", pd.sequence, pd.tm, "[user-supplied]")
+        else:
+            neb = NEB_CATALOG.get(pd.enzyme or "", {})
+            neb_tag = f"NEB {neb['hf'] or neb['cat']} (HF)" if neb.get("hf") else \
+                      (f"NEB {neb['cat']}" if neb else "")
+            warn_tag = f"  ⚠ {neb['note']}" if neb.get("note") else ""
+            _prow("D", pd.sequence, pd.tm,
+                  f"[{pd.enzyme}  {neb_tag}  cut {pd.cut_pos}]{warn_tag}")
     else:
         print("    D  (not found)")
 
@@ -815,6 +829,8 @@ def main(argv: list[str] | None = None):
         tm_range=(args.tm_min, args.tm_max),
         window_bp=tuple(args.window),
         min_overlap=args.min_overlap,
+        primer_A_seq=args.primer_a_seq,
+        primer_D_seq=args.primer_d_seq,
     )
 
     real_stdout = sys.stdout
