@@ -473,6 +473,39 @@ def _render_mutated_region(result, aa_flank: int = 15):
     )
 
 
+def _render_cut_site_diff(result):
+    """
+    Every NEB enzyme gained/lost anywhere in the construct, wild type vs
+    mutant — not just the one enzyme picked as the diagnostic, so the full
+    restriction-map impact of the edit is visible at a glance.
+    """
+    diff = getattr(result, "cut_site_diff", None) or {}
+    gained = diff.get("gained", {})
+    lost = diff.get("lost", {})
+    if not gained and not lost:
+        return
+
+    st.markdown(
+        '<div class="section-label">Cutting pattern diff (wild type vs mutant)</div>',
+        unsafe_allow_html=True,
+    )
+    rows = []
+    for enz in sorted(gained):
+        positions = ", ".join(str(p) for p in gained[enz])
+        rows.append(["+ gained", enz, positions, "mutant only"])
+    for enz in sorted(lost):
+        positions = ", ".join(str(p) for p in lost[enz])
+        rows.append(["− lost", enz, positions, "wild type only"])
+    st.dataframe(
+        {"Change": [r[0] for r in rows],
+         "Enzyme": [r[1] for r in rows],
+         "Position(s)": [r[2] for r in rows],
+         "Present in": [r[3] for r in rows]},
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
 def _render_result(result, key_prefix=""):
     if result.errors:
         for e in result.errors:
@@ -504,6 +537,7 @@ def _render_result(result, key_prefix=""):
     st.markdown(f'<div class="result-card">{rows_html}</div>', unsafe_allow_html=True)
 
     _render_mutated_region(result)
+    _render_cut_site_diff(result)
 
     st.markdown('<div class="section-label">Primers (5\' → 3\')</div>', unsafe_allow_html=True)
     rows = []

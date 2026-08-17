@@ -367,6 +367,23 @@ def _print_formatted(result, show_all_candidates: bool):
                f"{d.silent_changes} nt change)")
         print(f"    Enzyme : {d.enzyme}  —  site {d.effect.upper()}  {src}")
 
+    # Cutting pattern diff: every NEB enzyme gained/lost anywhere in the
+    # construct, wild type vs mutant — not just the one enzyme picked above
+    # as the diagnostic, so you can see the full restriction-map impact of
+    # the edit (e.g. to sanity-check nothing unexpected also changed).
+    diff = result.cut_site_diff or {}
+    gained = diff.get("gained", {})
+    lost = diff.get("lost", {})
+    if gained or lost:
+        print(f"\n  {_hr()}")
+        print(f"  Cutting pattern diff  (wild type vs mutant)")
+        for enz in sorted(gained):
+            positions = ", ".join(str(p) for p in gained[enz])
+            print(f"    + {enz:<10} gained at nt {positions} (mutant only)")
+        for enz in sorted(lost):
+            positions = ", ".join(str(p) for p in lost[enz])
+            print(f"    − {enz:<10} lost at nt {positions} (wild type only)")
+
     # Primers
     print(f"\n  {_hr()}")
     print(f"  Primers  (5'→3')")

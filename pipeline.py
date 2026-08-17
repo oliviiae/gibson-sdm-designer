@@ -89,6 +89,12 @@ class PipelineResult:
     # ── Diagnostic restriction site ───────────────────────────────────────
     diagnostic: DiagnosticInfo | None = None
 
+    # ── Full cutting-pattern diff: every NEB enzyme gained/lost anywhere in
+    #    the construct by the mutation (not just the one picked as the
+    #    diagnostic) — {"gained": {enzyme: [1-based positions in mutated
+    #    seq]}, "lost": {enzyme: [1-based positions in wild-type seq]}}
+    cut_site_diff: dict = field(default_factory=lambda: {"gained": {}, "lost": {}})
+
     # ── Fragment sizes ────────────────────────────────────────────────────
     frag_ab_bp: int = 0
     frag_cd_bp: int = 0
@@ -612,6 +618,7 @@ def design_mutation_primers(
 
         result.diagnostic = diagnostic
         result.mutated_sequence = working_seq
+        result.cut_site_diff = gained_lost_sites(sequence, working_seq)
 
         # ── Part 4: B/C primers ───────────────────────────────────────────────
         try:
@@ -888,6 +895,7 @@ def result_to_dict(r: PipelineResult) -> dict[str, Any]:
         ),
         overlap=dict(sequence=r.overlap_seq, tm=r.overlap_tm),
         diagnostic=_diag(r.diagnostic),
+        cut_site_diff=r.cut_site_diff,
         fragment_lengths=dict(ab=r.frag_ab_bp, cd=r.frag_cd_bp, ad=r.frag_ad_bp),
         fragment_sequences=dict(ab=r.frag_ab_seq, cd=r.frag_cd_seq, ad=r.frag_ad_seq),
         verification=dict(
