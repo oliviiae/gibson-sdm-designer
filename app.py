@@ -350,7 +350,11 @@ def _render_seq_with_cuts(
         rel = (cut_pos - 1) - frag_start
         if 0 <= rel < len(seq):
             labels.append((rel, enzyme))
-    for rel, enzyme in sorted(labels, key=lambda x: -x[0]):
+    # Multiple enzymes can cut at the same position — wrap each unique
+    # position only once (in descending order so earlier insertions don't
+    # shift later indices). Wrapping the same index twice would splice into
+    # the already-inserted <span> tag itself, corrupting the HTML.
+    for rel in sorted({r for r, _ in labels}, reverse=True):
         marked = (
             marked[:rel]
             + f'<span style="background:#fde8e8;color:#a33232;font-weight:700;">{marked[rel]}</span>'
