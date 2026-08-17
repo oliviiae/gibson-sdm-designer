@@ -369,6 +369,50 @@ def _render_seq_with_cuts(
         )
 
 
+def _mark_dna_mutations(
+    dna_window: str,
+    win_start: int,
+    positions: list[int],
+    original_codons: list[str],
+    new_codons: list[str],
+) -> str:
+    """
+    Color-code dna_window: the rest of a changed codon is shown in red/bold
+    for context, and the specific nucleotide(s) that actually differ from
+    wild type within that codon get a distinct highlighted background —
+    since a single point mutation usually changes only 1 of the 3 bases in
+    its codon, not the whole thing.
+    """
+    n = len(dna_window)
+    styles = [None] * n  # None / "codon" / "nt"
+    for i, pos in enumerate(positions):
+        codon_start = (pos - win_start) * 3
+        if codon_start < 0 or codon_start + 3 > n:
+            continue
+        orig = original_codons[i] if i < len(original_codons) else ""
+        new = new_codons[i] if i < len(new_codons) else ""
+        for j in range(3):
+            idx = codon_start + j
+            if styles[idx] is None:
+                styles[idx] = "codon"
+            if j < len(orig) and j < len(new) and orig[j] != new[j]:
+                styles[idx] = "nt"
+
+    out = []
+    for ch, style in zip(dna_window, styles):
+        if style == "nt":
+            out.append(
+                '<span style="background:#ffd43b;color:#7a4a00;'
+                'font-weight:800;border-radius:3px;padding:0 1px;">'
+                f"{ch}</span>"
+            )
+        elif style == "codon":
+            out.append(f'<span style="color:#c0392b;font-weight:700;">{ch}</span>')
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _render_mutated_region(result, aa_flank: int = 15):
     """Show the mutated ORF's DNA + protein for a window around the
     mutation(s), with the changed codon(s)/residue(s) bracketed."""
@@ -395,18 +439,15 @@ def _render_mutated_region(result, aa_flank: int = 15):
     dna_window = mutated_seq[dna_start:dna_end]
     protein_window = protein[win_start - 1: win_end]
 
-    codon_spans = [
-        ((pos - win_start) * 3, (pos - win_start) * 3 + 3)
-        for pos in positions if win_start <= pos <= win_end
-    ]
     residue_spans = [
         (pos - win_start, pos - win_start + 1)
         for pos in positions if win_start <= pos <= win_end
     ]
 
-    dna_marked = _bracket_spans(dna_window, codon_spans).replace(
-        "[", '<span style="color:#c0392b;font-weight:700;">['
-    ).replace("]", ']</span>')
+    dna_marked = _mark_dna_mutations(
+        dna_window, win_start, positions,
+        result.original_codons, result.new_codons,
+    )
     protein_marked = _bracket_spans(protein_window, residue_spans).replace(
         "[", '<span style="color:#c0392b;font-weight:700;">['
     ).replace("]", ']</span>')
@@ -425,6 +466,10 @@ def _render_mutated_region(result, aa_flank: int = 15):
         f'{protein_marked}</span></div>'
         f'</div>',
         unsafe_allow_html=True,
+    )
+    st.caption(
+        "Red = changed codon/residue · yellow highlight = the exact "
+        "nucleotide(s) that differ from wild type"
     )
 
 
