@@ -67,6 +67,9 @@ class CandidateSite:
     primer_end: int      # 0-based end   in full_seq (exclusive)
     primer_tm: float     # Wallace Tm of the designed primer
     tm_dist: float       # |primer_tm - target_tm|
+    extended_tm: bool = False   # True if Tm is above tm_range[1] (allowed up
+                                 # to extended_tm_max only because the primer's
+                                 # 3' base is A or T)
 
 
 @dataclass
@@ -124,7 +127,8 @@ def design_flanking_primer(
     tm_range: tuple[float, float] = (48.0, 54.0),
     min_len: int = 16,
     max_len: int = 100,
-) -> tuple[str, int, int, float]:
+    extended_tm_max: float = 56.0,
+) -> tuple[str, int, int, float, bool]:
     """
     Design a flanking primer anchored at cut_pos, walking in direction toward
     the mutation.
@@ -138,6 +142,9 @@ def design_flanking_primer(
     tm_range  : target Wallace Tm window
     min_len   : minimum primer length (protocol: >=16nt overlap with vector)
     max_len   : safety cap on search length
+    extended_tm_max : a Tm above tm_range[1] (up to this ceiling) is still
+                accepted, but only if the primer's 3' base is A or T —
+                used as a fallback when no length hits the normal window.
 
     Per protocol, A/D need Tm 48-54°C AND >=16nt — both at once, not one
     then the other. Searching length-by-length starting at min_len (rather
@@ -145,18 +152,22 @@ def design_flanking_primer(
     for length) avoids a case where reaching min_len only after Tm was
     already satisfied at a shorter length pushes the Tm back out of range.
     Unlike primers B/C, there is no G/C-ending requirement for A/D in the
-    protocol, so none is enforced here.
+    protocol, so none is enforced here — except in the extended-Tm fallback,
+    where an A/T 3' end is what makes the higher Tm acceptable.
 
     Returns
     -------
-    (primer_seq, start, end, tm) if a length in [min_len, max_len] satisfies
-    both Tm 48-54°C and the length requirement simultaneously.
+    (primer_seq, start, end, tm, extended_tm) if a length in [min_len, max_len]
+    satisfies the length requirement and either lands Tm in the normal
+    48-54°C window (extended_tm=False), or lands Tm in (54, extended_tm_max]
+    with a 3' A/T base (extended_tm=True).
     None if no such length exists (e.g. the local sequence is so AT-rich or
     GC-rich that no length in range hits the target Tm) — callers should
     treat this restriction site as unusable, not silently accept an
     out-of-spec primer.
     """
     tm_lo, tm_hi = tm_range
+    extended_candidate = None
 
     for length in range(min_len, max_len + 1):
         if direction == 1:
@@ -170,9 +181,15 @@ def design_flanking_primer(
         primer = seq[start:end]
         tm = simple_tm(primer)
         if tm_lo <= tm <= tm_hi:
-            return primer, start, end, tm
+            return primer, start, end, tm, False
+        if (
+            extended_candidate is None
+            and tm_hi < tm <= extended_tm_max
+            and primer[-1] in "AT"
+        ):
+            extended_candidate = (primer, start, end, tm, True)
 
-    return None
+    return extended_candidate
 
 
 # Common single-cutter enzymes routinely stocked in molecular-biology labs.
@@ -251,10 +268,11 @@ def rank_candidates(
     preferred: list[str] | None = None,
 ) -> list[CandidateSite]:
     """
-    Sort candidates by a three-key priority:
-      1. |primer_tm - target_tm|  (closest to target wins)
-      2. Preference rank (PREFERRED_ENZYMES order; unlisted enzymes last)
-      3. Enzyme name alphabetically (deterministic tie-break)
+    Sort candidates by a four-key priority:
+      1. In-range Tm (48-54°C) before extended-range Tm (54-56°C, A/T 3' end)
+      2. |primer_tm - target_tm|  (closest to target wins)
+      3. Preference rank (PREFERRED_ENZYMES order; unlisted enzymes last)
+      4. Enzyme name alphabetically (deterministic tie-break)
 
     Pass preferred=[] to disable the preference list.
     """
@@ -262,7 +280,7 @@ def rank_candidates(
     pref_default = len(pref)
     return sorted(
         candidates,
-        key=lambda c: (c.tm_dist, pref.get(c.enzyme, pref_default), c.enzyme),
+        key=lambda c: (c.extended_tm, c.tm_dist, pref.get(c.enzyme, pref_default), c.enzyme),
     )
 
 
@@ -321,11 +339,12 @@ def design_ad_primers(
                     full_seq, cut_0, direction, tm_range, min_len
                 )
                 if walked is None:
-                    # No primer length from this site hits Tm 48-54°C at
-                    # >=16nt — not a usable candidate, skip it rather than
-                    # ranking an out-of-spec primer alongside valid ones.
+                    # No primer length from this site hits Tm 48-54°C (or
+                    # the extended A/T-terminus allowance) at >=16nt — not a
+                    # usable candidate, skip it rather than ranking an
+                    # out-of-spec primer alongside valid ones.
                     continue
-                primer_seq, p_start, p_end, p_tm = walked
+                primer_seq, p_start, p_end, p_tm, p_extended = walked
                 cands.append(CandidateSite(
                     enzyme=enz_name,
                     cut_pos=cut_0 + 1,   # store 1-based for display
@@ -335,6 +354,7 @@ def design_ad_primers(
                     primer_end=p_end,
                     primer_tm=p_tm,
                     tm_dist=abs(p_tm - target_tm),
+                    extended_tm=p_extended,
                 ))
         ranked = rank_candidates(cands, target_tm, preferred=preferred)
         return FlankingPrimerResult(

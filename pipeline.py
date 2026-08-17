@@ -739,6 +739,13 @@ def design_mutation_primers(
                 enzyme=top_a.enzyme,
                 cut_pos=top_a.cut_pos,
             )
+            if top_a.extended_tm:
+                result.warnings.append(
+                    f"Primer A's Tm ({top_a.primer_tm:.0f}°C) is above the "
+                    f"normal {tm_range[1]:.0f}°C target but was accepted because "
+                    f"its 3' end is A/T — no length at this site hit the "
+                    f"normal {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
+                )
 
         if result_d.top is None:
             result.warnings.append(
@@ -758,6 +765,13 @@ def design_mutation_primers(
                 enzyme=top_d.enzyme,
                 cut_pos=top_d.cut_pos,
             )
+            if top_d.extended_tm:
+                result.warnings.append(
+                    f"Primer D's Tm ({top_d.primer_tm:.0f}°C) is above the "
+                    f"normal {tm_range[1]:.0f}°C target but was accepted because "
+                    f"its 3' end is A/T — no length at this site hit the "
+                    f"normal {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
+                )
 
         # ── Part 6: assembly and verification ─────────────────────────────────
         if result.primer_A is None or result.primer_D is None:

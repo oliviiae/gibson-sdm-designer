@@ -120,7 +120,7 @@ def test_design_flanking_primer():
     mock_cut = b_start - 850   # well inside the 700-1000 bp window
     mock_cut = max(0, mock_cut)
 
-    primer, start, end, tm = design_flanking_primer(
+    primer, start, end, tm, extended = design_flanking_primer(
         mutated_seq, mock_cut, direction=+1
     )
     print(f"  Primer A mock: 5'-{primer}-3'  [{start},{end})  Tm={tm}")
@@ -135,7 +135,7 @@ def test_design_flanking_primer():
     _, _, _, c_end = _setup_bc()
     mock_cut_d = c_end + 850
     mock_cut_d = min(len(mutated_seq) - 1, mock_cut_d)
-    primer_d, start_d, end_d, tm_d = design_flanking_primer(
+    primer_d, start_d, end_d, tm_d, extended_d = design_flanking_primer(
         mutated_seq, mock_cut_d, direction=-1
     )
     print(f"  Primer D mock: 5'-{primer_d}-3'  [{start_d},{end_d})  Tm={tm_d}")
