@@ -516,9 +516,6 @@ def _render_result(result, key_prefix=""):
             st.error(e)
         return
 
-    for w in result.warnings:
-        st.warning(w)
-
     kv = [
         ("Mutation", result.mutation_label),
         ("Codon change", f"<code>{result.original_codon}</code> → <code>{result.new_codon}</code>"),
