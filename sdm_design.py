@@ -455,19 +455,31 @@ def _print_formatted(result, show_all_candidates: bool):
         _print_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="full construct")
 
     # Full restriction digest map — every enzyme's cut site anywhere in the
-    # construct, not just primer A/D/diagnostic. Useful for planning any
-    # other digest, not only the one this design's verification relies on.
+    # construct, not just primer A/D/diagnostic. Shown for BOTH wild type and
+    # mutant so the two can be compared directly, not just their diff.
     if result.mutated_sequence:
-        full_map = scan_sites(result.mutated_sequence)
-        all_cuts = [
-            (pos, enz) for enz, positions in full_map.items() for pos in positions
+        mut_map = scan_sites(result.mutated_sequence)
+        mut_cuts = [
+            (pos, enz) for enz, positions in mut_map.items() for pos in positions
         ]
-        if all_cuts:
+        if mut_cuts:
             print(f"\n  {_hr()}")
-            print(f"  Full restriction digest map  "
-                  f"({len(all_cuts)} sites, {len(full_map)} enzymes, "
+            print(f"  Full restriction digest map — mutant  "
+                  f"({len(mut_cuts)} sites, {len(mut_map)} enzymes, "
                   f"{len(result.mutated_sequence)} bp)")
-            _print_seq_with_cuts(result.mutated_sequence, 0, all_cuts, unit="full construct")
+            _print_seq_with_cuts(result.mutated_sequence, 0, mut_cuts, unit="full construct")
+
+    if result.original_sequence:
+        wt_map = scan_sites(result.original_sequence)
+        wt_cuts = [
+            (pos, enz) for enz, positions in wt_map.items() for pos in positions
+        ]
+        if wt_cuts:
+            print(f"\n  {_hr()}")
+            print(f"  Full restriction digest map — wild type  "
+                  f"({len(wt_cuts)} sites, {len(wt_map)} enzymes, "
+                  f"{len(result.original_sequence)} bp)")
+            _print_seq_with_cuts(result.original_sequence, 0, wt_cuts, unit="wild-type construct")
 
     # PCR products (sizes + sequences, with cut sites marked)
     if result.frag_ad_bp:

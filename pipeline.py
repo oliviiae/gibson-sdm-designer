@@ -108,6 +108,7 @@ class PipelineResult:
 
     # ── Full mutated construct (5'→3', includes any silent mutation too) ───
     mutated_sequence: str = ""
+    original_sequence: str = ""  # the input construct, unmodified (wild type)
 
     # ── Verification ──────────────────────────────────────────────────────
     translation_passed: bool | None = None
@@ -400,6 +401,7 @@ def design_mutation_primers(
         original_codon="",
         new_codon="",
         changed_positions=[],
+        original_sequence=sequence,
     )
 
     try:
@@ -969,6 +971,7 @@ def result_to_dict(r: PipelineResult) -> dict[str, Any]:
             )
         ],
         mutated_sequence=r.mutated_sequence,
+        original_sequence=r.original_sequence,
         primers=dict(
             A=_primer(r.primer_A),
             B=_primer(r.primer_B),

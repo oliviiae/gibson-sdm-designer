@@ -594,16 +594,28 @@ def _render_result(result, key_prefix=""):
             _render_seq_with_cuts(result.mutated_sequence, 0, whole_cuts, unit="the full construct")
 
     if result.mutated_sequence:
-        full_map = scan_sites(result.mutated_sequence)
-        all_cuts = [
-            (pos, enz) for enz, positions in full_map.items() for pos in positions
+        mut_map = scan_sites(result.mutated_sequence)
+        mut_cuts = [
+            (pos, enz) for enz, positions in mut_map.items() for pos in positions
         ]
-        if all_cuts:
+        if mut_cuts:
             with st.expander(
-                f"Show full restriction digest map ({len(all_cuts)} sites, "
-                f"{len(full_map)} enzymes)"
+                f"Show full restriction digest map — mutant ({len(mut_cuts)} sites, "
+                f"{len(mut_map)} enzymes)"
             ):
-                _render_seq_with_cuts(result.mutated_sequence, 0, all_cuts, unit="the full construct")
+                _render_seq_with_cuts(result.mutated_sequence, 0, mut_cuts, unit="the mutant construct")
+
+    if result.original_sequence:
+        wt_map = scan_sites(result.original_sequence)
+        wt_cuts = [
+            (pos, enz) for enz, positions in wt_map.items() for pos in positions
+        ]
+        if wt_cuts:
+            with st.expander(
+                f"Show full restriction digest map — wild type ({len(wt_cuts)} sites, "
+                f"{len(wt_map)} enzymes)"
+            ):
+                _render_seq_with_cuts(result.original_sequence, 0, wt_cuts, unit="the wild-type construct")
 
     if result.frag_ad_bp:
         with st.expander("Show PCR product sequences (cut sites marked)"):
