@@ -333,14 +333,15 @@ def _collect_all_cut_sites(result) -> list[tuple[int | None, str | None]]:
 
 def _render_seq_with_cuts(
     seq: str, frag_start: int, cuts: list[tuple[int | None, str | None]],
-    unit: str = "this fragment",
+    unit: str = "this fragment", bg: str = "#fde8e8", fg: str = "#a33232",
 ):
     """
     Render seq (monospace) with each restriction enzyme's cut site
     highlighted in place. cuts: list of (cut_pos_1based_in_full_construct,
     enzyme_name) — mirrors the CLI's cut-site marking exactly. frag_start is
     the 0-based absolute position where seq begins in the full construct
-    (0 when seq itself IS the full construct).
+    (0 when seq itself IS the full construct). bg/fg let callers use a
+    different highlight color (e.g. to distinguish gained vs lost sites).
     """
     marked = seq
     labels = []
@@ -357,7 +358,7 @@ def _render_seq_with_cuts(
     for rel in sorted({r for r, _ in labels}, reverse=True):
         marked = (
             marked[:rel]
-            + f'<span style="background:#fde8e8;color:#a33232;font-weight:700;">{marked[rel]}</span>'
+            + f'<span style="background:{bg};color:{fg};font-weight:700;">{marked[rel]}</span>'
             + marked[rel + 1:]
         )
     st.markdown(
@@ -508,6 +509,23 @@ def _render_cut_site_diff(result):
         hide_index=True,
         use_container_width=True,
     )
+
+    # Stacked direct comparison: wild type directly above mutant, each with
+    # only its diff sites marked (red = lost from WT, green = gained in
+    # mutant) — same sequence, same coordinates, so the two lines line up.
+    if result.original_sequence and result.mutated_sequence:
+        wt_cuts = [(pos, enz) for enz, positions in lost.items() for pos in positions]
+        mut_cuts = [(pos, enz) for enz, positions in gained.items() for pos in positions]
+        st.caption("Wild type (red = site lost)")
+        _render_seq_with_cuts(
+            result.original_sequence, 0, wt_cuts, unit="wild type",
+            bg="#fde8e8", fg="#a33232",
+        )
+        st.caption("Mutant (green = site gained)")
+        _render_seq_with_cuts(
+            result.mutated_sequence, 0, mut_cuts, unit="mutant",
+            bg="#e3f7e6", fg="#227a3d",
+        )
 
 
 def _render_result(result, key_prefix=""):

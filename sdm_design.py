@@ -392,6 +392,17 @@ def _print_formatted(result, show_all_candidates: bool):
             positions = ", ".join(str(p) for p in lost[enz])
             print(f"    − {enz:<10} lost at nt {positions} (wild type only)")
 
+        # Direct stacked comparison: wild type directly above mutant, each
+        # with only its diff sites marked, at matching coordinates, so the
+        # two lines can be read one against the other.
+        if result.original_sequence and result.mutated_sequence:
+            wt_cuts = [(p, e) for e, ps in lost.items() for p in ps]
+            mut_cuts = [(p, e) for e, ps in gained.items() for p in ps]
+            print(f"\n    Wild type  (- = site lost)")
+            _print_seq_with_cuts(result.original_sequence, 0, wt_cuts, unit="wild type")
+            print(f"\n    Mutant  (+ = site gained)")
+            _print_seq_with_cuts(result.mutated_sequence, 0, mut_cuts, unit="mutant")
+
     # Primers
     print(f"\n  {_hr()}")
     print(f"  Primers  (5'→3')")
