@@ -146,8 +146,8 @@ class VerificationReport:
 
     # Primer sequences (5'→3', ready to order)
     primer_a: str
-    primer_b: str
-    primer_c: str                # antisense
+    primer_b: str                # antisense
+    primer_c: str
     primer_d: str
     primer_a_tm: float
     primer_b_tm: float
@@ -479,10 +479,11 @@ def print_report(report: VerificationReport) -> None:
     print(f"\n  Primers  (5'→3')")
     print(f"    A  [{report.primer_a_enzyme:<8}]  Tm={report.primer_a_tm:>3.0f}°C  "
           f"{report.primer_a}")
-    print(f"    B  [overlap  ]  Tm={report.primer_b_tm:>3.0f}°C  {report.primer_b}")
+    print(f"    B  [overlap  ]  Tm={report.primer_b_tm:>3.0f}°C  "
+          f"{report.primer_b}  (antisense)")
     print(f"    C  [overlap  ]  Tm={report.primer_c_tm_anneal:>3.0f}°C (anneal) / "
           f"{report.primer_c_tm_full:.0f}°C (full)")
-    print(f"                         {report.primer_c}  (antisense)")
+    print(f"                         {report.primer_c}  (sense)")
     print(f"    D  [{report.primer_d_enzyme:<8}]  Tm={report.primer_d_tm:>3.0f}°C  "
           f"{report.primer_d}")
 

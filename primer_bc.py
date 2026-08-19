@@ -15,15 +15,28 @@ design_bc_primers(mutated_seq, changed_positions, tm_range, min_overlap)
 
 PrimerBCResult fields
 ---------------------
-b_start, b_end      0-based half-open indices of primer B in mutated_seq
-c_start, c_end      0-based half-open indices of primer C template strand
-primer_b            sequence of primer B  (5'→3', sense strand)
-primer_c            sequence of primer C  (5'→3', antisense — ready to order)
-primer_c_fwd        template-strand sequence of primer C region (diagnostic)
+b_start, b_end      0-based half-open indices of primer B's template-strand
+                    span in mutated_seq (NOT the oligo's own orientation)
+c_start, c_end      0-based half-open indices of primer C's template-strand span
+primer_b            sequence of primer B  (5'→3', antisense — ready to order).
+                    Primer B pairs with primer A to amplify fragment "ab";
+                    since A anneals as the forward primer, B — sitting at the
+                    fragment's far (downstream-in-sense-coordinates) end —
+                    must be the reverse primer that closes the product back
+                    toward A, so its oligo is the reverse complement of the
+                    template-strand span [b_start, b_end).
+primer_b_fwd        template-strand sequence of primer B's span (diagnostic)
+primer_c            sequence of primer C  (5'→3', sense strand — ready to
+                    order). Primer C pairs with primer D to amplify fragment
+                    "cd"; since it sits at the fragment's near (upstream)
+                    end and primes synthesis forward toward D, it is the
+                    forward primer and needs no reverse-complementing.
 overlap_seq         the shared sequence
 overlap_start       0-based start of overlap in mutated_seq
 overlap_end         0-based end   of overlap in mutated_seq (exclusive)
-tm_b                Wallace Tm of primer B. Usually == overlap Tm, since the
+tm_b                Wallace Tm of primer B (orientation-invariant, so the
+                    same value whether measured on the oligo or its
+                    template-strand span). Usually == overlap Tm, since the
                     overlap search tries starting exactly at b_start first —
                     but may differ slightly if the overlap had to start a
                     few bases later to satisfy the G/C-terminus + Tm-range
@@ -43,17 +56,21 @@ from tm_utils import simple_tm, walk_to_tm
 
 @dataclass
 class PrimerBCResult:
-    # Primer B (forward, sense strand)
+    # Primer B (antisense/reverse; pairs with primer A for fragment "ab".
+    # primer_b is the reverse complement of the template-strand span — the
+    # actual oligo to order.)
     b_start: int
     b_end: int
-    primer_b: str
+    primer_b: str          # reverse complement — the actual oligo
+    primer_b_fwd: str      # template-strand span (for position reference)
     tm_b: float
 
-    # Primer C (reverse; primer_c is the sequence you order, 5'→3' antisense)
+    # Primer C (sense/forward; pairs with primer D for fragment "cd".
+    # primer_c is the template-strand span itself, unmodified — no reverse
+    # complement needed since it primes forward.)
     c_start: int          # start on forward strand (= overlap_start)
     c_end: int            # end on forward strand (exclusive)
-    primer_c: str         # reverse complement — the actual oligo
-    primer_c_fwd: str     # forward-strand span (for position reference)
+    primer_c: str          # sense strand — the actual oligo
     tm_c_full: float      # Tm of the complete primer C (overlap + annealing tail)
     tm_c_anneal: float    # Tm of the unique annealing region [overlap_end, c_end)
 
@@ -159,8 +176,14 @@ def design_bc_primers(
        b_start and ending on a G/C, covering the mutation, whose forward-
        strand AND reverse-complement Tm are both in tm_range.
 
-    4. Primer B = mutated_seq[b_start : overlap_end]  (sense, 5'→3')
-       Primer C = RC of mutated_seq[overlap_start : c_end]  (antisense, 5'→3')
+    4. Primer B = RC of mutated_seq[b_start : overlap_end]  (antisense, 5'→3')
+       — B pairs with primer A to amplify fragment "ab"; sitting at that
+       fragment's far end, it must be the reverse primer that closes the
+       product back toward A.
+       Primer C = mutated_seq[overlap_start : c_end]  (sense, 5'→3')
+       — C pairs with primer D to amplify fragment "cd"; sitting at that
+       fragment's near end, it primes forward toward D and needs no
+       reverse-complementing.
     """
     mutated_seq = mutated_seq.upper()
     first_mut = min(changed_positions)
@@ -219,21 +242,29 @@ def design_bc_primers(
         )
 
     # --- Step 4: build primer sequences --------------------------------------
-    primer_b     = mutated_seq[b_start:ov_end]          # forward, sense
-    primer_c_fwd = mutated_seq[ov_start:c_end]           # template region
-    primer_c     = str(Seq(primer_c_fwd).reverse_complement())
+    # Primer B pairs with A for fragment "ab" and sits at that fragment's far
+    # end, so it must be the reverse primer that closes the product back
+    # toward A — its oligo is the reverse complement of the template-strand
+    # span. Primer C pairs with D for fragment "cd" and sits at that
+    # fragment's near end, priming forward toward D, so it needs no
+    # reverse-complementing. (Tm is orientation-invariant under the Wallace
+    # rule, so tm_b's value is identical whether measured on primer_b or
+    # primer_b_fwd.)
+    primer_b_fwd = mutated_seq[b_start:ov_end]           # template-strand span
+    primer_b     = str(Seq(primer_b_fwd).reverse_complement())  # antisense oligo
+    primer_c     = mutated_seq[ov_start:c_end]           # sense oligo, unmodified
 
     return PrimerBCResult(
         b_start=b_start,
         b_end=ov_end,
         primer_b=primer_b,
-        tm_b=simple_tm(primer_b),
+        primer_b_fwd=primer_b_fwd,
+        tm_b=simple_tm(primer_b_fwd),
 
         c_start=ov_start,
         c_end=c_end,
         primer_c=primer_c,
-        primer_c_fwd=primer_c_fwd,
-        tm_c_full=simple_tm(primer_c_fwd),
+        tm_c_full=simple_tm(primer_c),
         tm_c_anneal=simple_tm(mutated_seq[ov_end:c_end]),  # downstream-only portion
 
         overlap_start=ov_start,

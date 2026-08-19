@@ -567,12 +567,12 @@ def _render_result(result, key_prefix=""):
         rows.append(["A", pa.sequence, f"{pa.tm:.0f}°C", note])
     if result.primer_B:
         pb = result.primer_B
-        rows.append(["B", pb.sequence, f"{pb.tm:.0f}°C", "sense (forward)"])
+        rows.append(["B", pb.sequence, f"{pb.tm:.0f}°C", "antisense (reverse)"])
     if result.primer_C:
         pc = result.primer_C
         rows.append(["C", pc.sequence,
                      f"{pc.tm:.0f}°C full / {pc.tm_anneal:.0f}°C anneal",
-                     "antisense (reverse)"])
+                     "sense (forward)"])
     if result.primer_D:
         pd = result.primer_D
         note = "user-supplied" if pd.enzyme is None else \

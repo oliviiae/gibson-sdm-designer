@@ -95,7 +95,8 @@ def test_design_bc_primers_k15e():
 
     print()
     print(f"  ── Primer B ──────────────────────────────────────────────")
-    print(f"  Sequence  : 5'-{result.primer_b}-3'")
+    print(f"  Template  : 5'-{result.primer_b_fwd}-3'  (fwd strand reference)")
+    print(f"  Sequence  : 5'-{result.primer_b}-3'  (antisense — order this)")
     print(f"  Length    : {len(result.primer_b)} bp")
     print(f"  Tm        : {result.tm_b} °C")
     print(f"  Position  : [{result.b_start}, {result.b_end})  "
@@ -111,8 +112,7 @@ def test_design_bc_primers_k15e():
 
     print()
     print(f"  ── Primer C ──────────────────────────────────────────────")
-    print(f"  Template  : 5'-{result.primer_c_fwd}-3'  (fwd strand reference)")
-    print(f"  Sequence  : 5'-{result.primer_c}-3'  (antisense — order this)")
+    print(f"  Sequence  : 5'-{result.primer_c}-3'  (sense — order this)")
     print(f"  Length    : {len(result.primer_c)} bp")
     print(f"  Tm (full) : {result.tm_c_full} °C  (overlap + annealing tail)")
     print(f"  Tm (anneal): {result.tm_c_anneal} °C  (unique downstream region only)")
@@ -181,12 +181,20 @@ def test_design_bc_primers_k15e():
         f"Overlap Tm {result.tm_overlap_fwd} outside target"
     assert result.tm_overlap_fwd == result.tm_overlap_rc
 
-    # Primer C sequence should be RC of the template region
-    expected_c = str(Seq(result.primer_c_fwd).reverse_complement())
-    assert result.primer_c == expected_c, "Primer C is not RC of template region"
+    # Primer B sequence should be RC of its template-strand span (B is the
+    # reverse primer, pairing with A for fragment "ab"); primer C should be
+    # the template-strand span itself, unmodified (C is the forward primer,
+    # pairing with D for fragment "cd").
+    expected_b = str(Seq(result.primer_b_fwd).reverse_complement())
+    assert result.primer_b == expected_b, "Primer B is not RC of its template region"
+    assert result.primer_c == mutated_seq[result.c_start:result.c_end], \
+        "Primer C should be the unmodified sense-strand span"
 
-    # Primer B must contain the mutation
-    assert mutated_seq[changed_pos[0]] == result.primer_b[changed_pos[0] - result.b_start], \
+    # Primer B must carry the mutation (checked on the template-strand
+    # span, which is positionally indexed the same way as mutated_seq —
+    # primer_b itself is reverse-complemented and so is NOT positionally
+    # aligned with mutated_seq).
+    assert mutated_seq[changed_pos[0]] == result.primer_b_fwd[changed_pos[0] - result.b_start], \
         "Primer B must carry the mutated base"
 
     print("\n  PASS")

@@ -427,13 +427,13 @@ def _print_formatted(result, show_all_candidates: bool):
 
     if result.primer_B:
         pb = result.primer_B
-        _prow("B", pb.sequence, pb.tm, "(sense / forward)")
+        _prow("B", pb.sequence, pb.tm, "(antisense / reverse)")
 
     if result.primer_C:
         pc = result.primer_C
         tm_note = (f"Tm={pc.tm:.0f}°C full / "
                    f"{pc.tm_anneal:.0f}°C anneal")
-        print(f"    C  {tm_note}  {pc.sequence}  (antisense / reverse)")
+        print(f"    C  {tm_note}  {pc.sequence}  (sense / forward)")
 
     if result.primer_D:
         pd = result.primer_D
