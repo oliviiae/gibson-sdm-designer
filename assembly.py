@@ -150,7 +150,8 @@ class VerificationReport:
     primer_c: str
     primer_d: str
     primer_a_tm: float
-    primer_b_tm: float
+    primer_b_tm: float           # full Tm (upstream annealing + overlap)
+    primer_b_tm_anneal: float    # unique upstream annealing region only
     primer_c_tm_full: float
     primer_c_tm_anneal: float
     primer_d_tm: float
@@ -434,6 +435,7 @@ def run_full_verification(
         primer_d=top_d.primer_seq,
         primer_a_tm=top_a.primer_tm,
         primer_b_tm=bc.tm_b,
+        primer_b_tm_anneal=bc.tm_b_anneal,
         primer_c_tm_full=bc.tm_c_full,
         primer_c_tm_anneal=bc.tm_c_anneal,
         primer_d_tm=top_d.primer_tm,
@@ -479,8 +481,9 @@ def print_report(report: VerificationReport) -> None:
     print(f"\n  Primers  (5'→3')")
     print(f"    A  [{report.primer_a_enzyme:<8}]  Tm={report.primer_a_tm:>3.0f}°C  "
           f"{report.primer_a}")
-    print(f"    B  [overlap  ]  Tm={report.primer_b_tm:>3.0f}°C  "
-          f"{report.primer_b}  (antisense)")
+    print(f"    B  [overlap  ]  Tm={report.primer_b_tm_anneal:>3.0f}°C (anneal) / "
+          f"{report.primer_b_tm:.0f}°C (full)")
+    print(f"                         {report.primer_b}  (antisense)")
     print(f"    C  [overlap  ]  Tm={report.primer_c_tm_anneal:>3.0f}°C (anneal) / "
           f"{report.primer_c_tm_full:.0f}°C (full)")
     print(f"                         {report.primer_c}  (sense)")

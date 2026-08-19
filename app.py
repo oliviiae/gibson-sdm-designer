@@ -311,6 +311,26 @@ def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     return out
 
 
+def _bracket_spans_colored(
+    seq: str, spans: list[tuple[int, int, str, str, str]],
+) -> str:
+    """
+    Like _bracket_spans, but each span carries its own (open_char, close_char,
+    color) — e.g. red "[ ]" for the target mutation vs blue "{ }" for a
+    silent diagnostic mutation, rendered as an HTML span around the whole
+    bracketed residue. spans may be unsorted/adjacent.
+    """
+    out = seq
+    for start, end, ochar, cchar, color in sorted(spans, key=lambda s: -s[0]):
+        out = (
+            out[:start]
+            + f'<span style="color:{color};font-weight:700;">{ochar}'
+            + out[start:end] + f'{cchar}</span>'
+            + out[end:]
+        )
+    return out
+
+
 def _collect_all_cut_sites(result) -> list[tuple[int | None, str | None]]:
     """
     Every restriction cut site actually relevant to this design: primer A's
@@ -380,16 +400,22 @@ def _mark_dna_mutations(
     positions: list[int],
     original_codons: list[str],
     new_codons: list[str],
+    silent_aa_index: int | None = None,
+    silent_original_codon: str | None = None,
+    silent_new_codon: str | None = None,
 ) -> str:
     """
     Color-code dna_window: the rest of a changed codon is shown in red/bold
     for context, and the specific nucleotide(s) that actually differ from
     wild type within that codon get a distinct highlighted background —
     since a single point mutation usually changes only 1 of the 3 bases in
-    its codon, not the whole thing.
+    its codon, not the whole thing. A silent diagnostic mutation (a second,
+    separate edit made only to create/destroy a restriction site) is marked
+    the same way but in blue, so it reads as related but distinct from the
+    red/yellow target mutation.
     """
     n = len(dna_window)
-    styles = [None] * n  # None / "codon" / "nt"
+    styles = [None] * n  # None / "codon" / "nt" / "silent_codon" / "silent_nt"
     for i, pos in enumerate(positions):
         codon_start = (pos - win_start) * 3
         if codon_start < 0 or codon_start + 3 > n:
@@ -403,6 +429,17 @@ def _mark_dna_mutations(
             if j < len(orig) and j < len(new) and orig[j] != new[j]:
                 styles[idx] = "nt"
 
+    if silent_aa_index is not None and silent_original_codon and silent_new_codon:
+        codon_start = (silent_aa_index - win_start) * 3
+        if 0 <= codon_start and codon_start + 3 <= n:
+            for j in range(3):
+                idx = codon_start + j
+                if styles[idx] is None:
+                    styles[idx] = "silent_codon"
+                if (j < len(silent_original_codon) and j < len(silent_new_codon)
+                        and silent_original_codon[j] != silent_new_codon[j]):
+                    styles[idx] = "silent_nt"
+
     out = []
     for ch, style in zip(dna_window, styles):
         if style == "nt":
@@ -413,6 +450,14 @@ def _mark_dna_mutations(
             )
         elif style == "codon":
             out.append(f'<span style="color:#c0392b;font-weight:700;">{ch}</span>')
+        elif style == "silent_nt":
+            out.append(
+                '<span style="background:#cfe8ff;color:#0b3d66;'
+                'font-weight:800;border-radius:3px;padding:0 1px;">'
+                f"{ch}</span>"
+            )
+        elif style == "silent_codon":
+            out.append(f'<span style="color:#1d5c9e;font-weight:700;">{ch}</span>')
         else:
             out.append(ch)
     return "".join(out)
@@ -420,7 +465,11 @@ def _mark_dna_mutations(
 
 def _render_mutated_region(result, aa_flank: int = 15):
     """Show the mutated ORF's DNA + protein for a window around the
-    mutation(s), with the changed codon(s)/residue(s) bracketed."""
+    mutation(s), with the changed codon(s)/residue(s) highlighted. If a
+    silent diagnostic mutation was added, its codon/residue is included in
+    the window (widening it if needed) and highlighted in blue, since it's
+    a real edit to the ordered primers even though it's not the target
+    change."""
     if not result.mutated_sequence or not result.mutation_positions:
         return
 
@@ -436,8 +485,16 @@ def _render_mutated_region(result, aa_flank: int = 15):
         return
 
     aa_min, aa_max = min(positions), max(positions)
-    win_start = max(1, aa_min - aa_flank)
-    win_end = min(len(protein), aa_max + aa_flank)
+
+    silent_aa = None
+    d = result.diagnostic
+    if d is not None and d.source == "silent_mutation" and d.silent_aa_index is not None:
+        silent_aa = d.silent_aa_index
+
+    win_min = min(aa_min, silent_aa) if silent_aa is not None else aa_min
+    win_max = max(aa_max, silent_aa) if silent_aa is not None else aa_max
+    win_start = max(1, win_min - aa_flank)
+    win_end = min(len(protein), win_max + aa_flank)
 
     dna_start = orf_start + (win_start - 1) * 3
     dna_end = orf_start + win_end * 3
@@ -452,10 +509,21 @@ def _render_mutated_region(result, aa_flank: int = 15):
     dna_marked = _mark_dna_mutations(
         dna_window, win_start, positions,
         result.original_codons, result.new_codons,
+        silent_aa_index=silent_aa,
+        silent_original_codon=d.silent_original_codon if d else None,
+        silent_new_codon=d.silent_new_codon if d else None,
     )
-    protein_marked = _bracket_spans(protein_window, residue_spans).replace(
-        "[", '<span style="color:#c0392b;font-weight:700;">['
-    ).replace("]", ']</span>')
+
+    has_silent = silent_aa is not None and win_start <= silent_aa <= win_end
+    styled_spans = [(start, end, "[", "]", "#c0392b") for start, end in residue_spans]
+    if has_silent:
+        idx = silent_aa - win_start
+        styled_spans.append((idx, idx + 1, "{", "}", "#1d5c9e"))
+    protein_marked = _bracket_spans_colored(protein_window, styled_spans)
+
+    caption = "Red = target mutation codon · yellow = its exact changed nucleotide(s)"
+    if has_silent:
+        caption += " · Blue = silent diagnostic mutation codon · light blue = its exact changed nucleotide(s)"
 
     st.markdown(
         f'<div class="section-label">Mutated region (aa {win_start}-{win_end})</div>',
@@ -472,10 +540,7 @@ def _render_mutated_region(result, aa_flank: int = 15):
         f'</div>',
         unsafe_allow_html=True,
     )
-    st.caption(
-        "Red = changed codon/residue · yellow highlight = the exact "
-        "nucleotide(s) that differ from wild type"
-    )
+    st.caption(caption)
 
 
 def _render_cut_site_diff(result):
@@ -567,7 +632,9 @@ def _render_result(result, key_prefix=""):
         rows.append(["A", pa.sequence, f"{pa.tm:.0f}°C", note])
     if result.primer_B:
         pb = result.primer_B
-        rows.append(["B", pb.sequence, f"{pb.tm:.0f}°C", "antisense (reverse)"])
+        rows.append(["B", pb.sequence,
+                     f"{pb.tm:.0f}°C full / {pb.tm_anneal:.0f}°C anneal",
+                     "antisense (reverse)"])
     if result.primer_C:
         pc = result.primer_C
         rows.append(["C", pc.sequence,

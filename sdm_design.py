@@ -291,10 +291,26 @@ def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     return out
 
 
+def _bracket_spans_styled(seq: str, spans: list[tuple[int, int, str, str]]) -> str:
+    """
+    Like _bracket_spans, but each span carries its own (open, close) bracket
+    pair — e.g. "[","]" for the primary mutation vs "{","}" for a silent
+    diagnostic mutation, so the two are visually distinguishable in plain
+    text. spans may be unsorted/adjacent.
+    """
+    out = seq
+    for start, end, ochar, cchar in sorted(spans, key=lambda s: -s[0]):
+        out = out[:start] + ochar + out[start:end] + cchar + out[end:]
+    return out
+
+
 def _print_mutated_region(result, aa_flank: int = 15):
     """
     Print the mutated ORF's DNA and translated protein for a window around
-    the mutation(s), with the changed codon(s)/residue(s) bracketed.
+    the mutation(s), with the changed codon(s)/residue(s) in [brackets]. If
+    a silent diagnostic mutation was added, its codon/residue is included in
+    the window (widening it if needed) and shown in {braces}, since it's a
+    real edit to the ordered primers even though it's not the target change.
     """
     if not result.mutated_sequence or not result.mutation_positions:
         return
@@ -311,8 +327,16 @@ def _print_mutated_region(result, aa_flank: int = 15):
         return
 
     aa_min, aa_max = min(positions), max(positions)
-    win_start = max(1, aa_min - aa_flank)
-    win_end = min(len(protein), aa_max + aa_flank)
+
+    silent_aa = None
+    d = result.diagnostic
+    if d is not None and d.source == "silent_mutation" and d.silent_aa_index is not None:
+        silent_aa = d.silent_aa_index
+
+    win_min = min(aa_min, silent_aa) if silent_aa is not None else aa_min
+    win_max = max(aa_max, silent_aa) if silent_aa is not None else aa_max
+    win_start = max(1, win_min - aa_flank)
+    win_end = min(len(protein), win_max + aa_flank)
 
     dna_start = orf_start + (win_start - 1) * 3
     dna_end = orf_start + win_end * 3
@@ -320,19 +344,29 @@ def _print_mutated_region(result, aa_flank: int = 15):
     protein_window = protein[win_start - 1: win_end]
 
     codon_spans = [
-        ((pos - win_start) * 3, (pos - win_start) * 3 + 3)
+        ((pos - win_start) * 3, (pos - win_start) * 3 + 3, "[", "]")
         for pos in positions if win_start <= pos <= win_end
     ]
     residue_spans = [
-        (pos - win_start, pos - win_start + 1)
+        (pos - win_start, pos - win_start + 1, "[", "]")
         for pos in positions if win_start <= pos <= win_end
     ]
+    if silent_aa is not None and win_start <= silent_aa <= win_end:
+        codon_spans.append(
+            ((silent_aa - win_start) * 3, (silent_aa - win_start) * 3 + 3, "{", "}")
+        )
+        residue_spans.append(
+            (silent_aa - win_start, silent_aa - win_start + 1, "{", "}")
+        )
+
+    note = "target mutation in [brackets]"
+    if silent_aa is not None:
+        note += ", silent diagnostic mutation in {braces}"
 
     print(f"\n  {_hr()}")
-    print(f"  Mutated region  (aa {win_start}-{win_end}, "
-          f"changed codon(s)/residue(s) in [brackets])")
-    print(f"    DNA      5'-{_bracket_spans(dna_window, codon_spans)}-3'")
-    print(f"    Protein     {_bracket_spans(protein_window, residue_spans)}")
+    print(f"  Mutated region  (aa {win_start}-{win_end}, {note})")
+    print(f"    DNA      5'-{_bracket_spans_styled(dna_window, codon_spans)}-3'")
+    print(f"    Protein     {_bracket_spans_styled(protein_window, residue_spans)}")
 
 
 def _print_formatted(result, show_all_candidates: bool):
@@ -427,7 +461,9 @@ def _print_formatted(result, show_all_candidates: bool):
 
     if result.primer_B:
         pb = result.primer_B
-        _prow("B", pb.sequence, pb.tm, "(antisense / reverse)")
+        tm_note = (f"Tm={pb.tm:.0f}°C full / "
+                   f"{pb.tm_anneal:.0f}°C anneal")
+        print(f"    B  {tm_note}  {pb.sequence}  (antisense / reverse)")
 
     if result.primer_C:
         pc = result.primer_C

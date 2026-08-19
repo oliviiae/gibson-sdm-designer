@@ -247,24 +247,34 @@ class _PipelineError(Exception):
     """Raised internally to abort the pipeline on a fatal error."""
 
 
-def _locate_user_primer(working_seq: str, primer_seq: str, label: str) -> tuple[int, int, str]:
+def _locate_user_primer(
+    working_seq: str, primer_seq: str, label: str, min_anneal: int = 12,
+) -> tuple[int, int, str, str | None]:
     """
     Find a user-supplied primer A/D sequence within working_seq.
 
-    Tries the sequence as given first, then its reverse complement, since a
-    user might paste either orientation. Either match is equally valid for
-    locating the span — Tm is orientation-invariant (a sequence and its
-    reverse complement have identical G/C and A/T counts under the Wallace
-    rule) — but the oligo actually stored/displayed is always normalized to
-    the orientation that primer needs: primer A is the forward primer, so
-    its oligo is the template-strand span unmodified; primer D closes
-    fragment "cd" back toward C and so is the reverse primer — its real
-    oligo is the reverse complement of the template-strand span, regardless
-    of which orientation the user happened to paste.
+    Tries an exact full-length match first — the sequence as given, then its
+    reverse complement, since a user might paste either orientation. If
+    neither matches exactly, falls back to tolerating a non-annealing tail:
+    real primers routinely carry extra 5' bases (a restriction site for
+    downstream cloning, a few "clamp" bases) that were never part of the
+    template and so can never appear in an exact match. Only the primer's
+    3' end has to actually anneal to prime PCR, so a tail is tolerated by
+    matching progressively shorter windows of the primer down to min_anneal
+    bp, requiring the match to always include the true 3' end:
+      - primer A is the forward primer: a 5' tail sits at the FRONT of the
+        oligo as typed, so the anneal-only region is its trailing SUFFIX.
+      - primer D is the reverse primer: a 5' tail (in D's own 5'→3' reading
+        direction) ends up trailing at the END of its reverse complement,
+        so the anneal-only region is the reverse complement's leading
+        PREFIX.
 
-    Returns (start, end, seq_as_stored) — start/end describe the template-
-    strand span (needed for fragment position math); seq_as_stored is the
-    correctly-oriented oligo for that primer's role.
+    Returns (start, end, seq_as_stored, tail_note) — start/end describe the
+    template-strand span of just the annealing region (needed for fragment
+    position math and Tm); seq_as_stored is the oligo to display, exactly as
+    the user typed it (tail included) when a tail was detected, otherwise
+    the correctly-oriented oligo re-derived from the template span; tail_note
+    is None for an exact match, or a description of the stripped tail.
     """
     primer_seq = primer_seq.upper().strip()
     if not primer_seq:
@@ -274,12 +284,17 @@ def _locate_user_primer(working_seq: str, primer_seq: str, label: str) -> tuple[
     fwd_count = working_seq.count(primer_seq)
     rev_count = working_seq.count(revcomp) if revcomp != primer_seq else 0
 
-    if fwd_count + rev_count == 0:
-        raise _PipelineError(
-            f"Primer {label} sequence not found in the construct — checked "
-            f"both as given and as its reverse complement. Double-check it "
-            f"was copied correctly and matches this sequence."
-        )
+    if fwd_count + rev_count == 1:
+        if fwd_count == 1:
+            start = working_seq.index(primer_seq)
+            end = start + len(primer_seq)
+        else:
+            start = working_seq.index(revcomp)
+            end = start + len(revcomp)
+        template_span = working_seq[start:end]
+        seq_as_stored = template_span if label == "A" else str(Seq(template_span).reverse_complement())
+        return start, end, seq_as_stored, None
+
     if fwd_count + rev_count > 1:
         raise _PipelineError(
             f"Primer {label} sequence is ambiguous — it (or its reverse "
@@ -287,16 +302,34 @@ def _locate_user_primer(working_seq: str, primer_seq: str, label: str) -> tuple[
             f"construct. Supply a longer, unique primer sequence."
         )
 
-    if fwd_count == 1:
-        start = working_seq.index(primer_seq)
-        end = start + len(primer_seq)
-    else:
-        start = working_seq.index(revcomp)
-        end = start + len(revcomp)
+    # No exact match — try tolerating a non-annealing tail on the
+    # assumption the user pasted the correct orientation for this primer's
+    # role (a tail combined with the WRONG orientation isn't handled; that
+    # falls through to the final error below).
+    candidate = primer_seq if label == "A" else revcomp
+    tail_side = "suffix" if label == "A" else "prefix"
+    for length in range(len(candidate) - 1, min_anneal - 1, -1):
+        window = candidate[-length:] if tail_side == "suffix" else candidate[:length]
+        if working_seq.count(window) != 1:
+            continue
+        start = working_seq.index(window)
+        end = start + length
+        tail_len = len(candidate) - length
+        tail_note = (
+            f"a {tail_len} bp non-annealing tail was detected and is not "
+            f"modeled in the assembled/verified product"
+        )
+        # seq_as_stored is exactly what the user typed — that's the real
+        # oligo to order, tail included.
+        return start, end, primer_seq, tail_note
 
-    template_span = working_seq[start:end]
-    seq_as_stored = template_span if label == "A" else str(Seq(template_span).reverse_complement())
-    return start, end, seq_as_stored
+    raise _PipelineError(
+        f"Primer {label} sequence not found in the construct — checked as "
+        f"given, as its reverse complement, and (assuming the correct "
+        f"orientation) for a match allowing a non-annealing tail down to "
+        f"{min_anneal}bp. Double-check it was copied correctly, matches "
+        f"this sequence, and isn't the wrong orientation with a tail."
+    )
 
 
 def _silent_mutation_seq(
@@ -707,6 +740,7 @@ def design_mutation_primers(
         result.primer_B = PrimerInfo(
             sequence=bc.primer_b,
             tm=bc.tm_b,
+            tm_anneal=bc.tm_b_anneal,
             length=len(bc.primer_b),
             start=bc.b_start,
             end=bc.b_end,
@@ -762,20 +796,22 @@ def design_mutation_primers(
         result.ad_result_d = result_d
 
         if primer_A_seq is not None:
-            start_a, end_a, seq_a = _locate_user_primer(working_seq, primer_A_seq, "A")
+            start_a, end_a, seq_a, tail_note_a = _locate_user_primer(working_seq, primer_A_seq, "A")
             if start_a >= bc.overlap_start:
                 raise _PipelineError(
                     f"Primer A (located at nt {start_a}-{end_a}) does not sit "
                     f"upstream of the B/C overlap (starts at nt {bc.overlap_start}) "
                     "— check that this is really the upstream/forward primer."
                 )
+            anneal_tm_a = simple_tm(working_seq[start_a:end_a])
             result.primer_A = PrimerInfo(
-                sequence=seq_a, tm=simple_tm(seq_a), length=len(seq_a),
+                sequence=seq_a, tm=anneal_tm_a, length=len(seq_a),
                 start=start_a, end=end_a,
             )
             result.warnings.append(
                 f"Primer A: using the supplied sequence (located at nt "
-                f"{start_a}-{end_a} in the construct, Tm={simple_tm(seq_a):.0f}°C)."
+                f"{start_a}-{end_a} in the construct, annealing Tm={anneal_tm_a:.0f}°C)"
+                + (f" — {tail_note_a}." if tail_note_a else ".")
             )
         elif result_a.top is None:
             result.warnings.append(
@@ -804,20 +840,22 @@ def design_mutation_primers(
                 )
 
         if primer_D_seq is not None:
-            start_d, end_d, seq_d = _locate_user_primer(working_seq, primer_D_seq, "D")
+            start_d, end_d, seq_d, tail_note_d = _locate_user_primer(working_seq, primer_D_seq, "D")
             if end_d <= bc.overlap_end:
                 raise _PipelineError(
                     f"Primer D (located at nt {start_d}-{end_d}) does not sit "
                     f"downstream of the B/C overlap (ends at nt {bc.overlap_end}) "
                     "— check that this is really the downstream/reverse primer."
                 )
+            anneal_tm_d = simple_tm(working_seq[start_d:end_d])
             result.primer_D = PrimerInfo(
-                sequence=seq_d, tm=simple_tm(seq_d), length=len(seq_d),
+                sequence=seq_d, tm=anneal_tm_d, length=len(seq_d),
                 start=start_d, end=end_d,
             )
             result.warnings.append(
                 f"Primer D: using the supplied sequence (located at nt "
-                f"{start_d}-{end_d} in the construct, Tm={simple_tm(seq_d):.0f}°C)."
+                f"{start_d}-{end_d} in the construct, annealing Tm={anneal_tm_d:.0f}°C)"
+                + (f" — {tail_note_d}." if tail_note_d else ".")
             )
         elif result_d.top is None:
             result.warnings.append(

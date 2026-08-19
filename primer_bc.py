@@ -44,6 +44,10 @@ tm_b                Wallace Tm of primer B (orientation-invariant, so the
 tm_c_full           Wallace Tm of full primer C  (overlap + downstream annealing)
 tm_c_anneal         Wallace Tm of primer C's unique downstream annealing region only
                     [overlap_end, c_end) — the portion that does NOT appear in primer B
+tm_b_full           Wallace Tm of full primer B  (upstream annealing + overlap)
+tm_b_anneal         Wallace Tm of primer B's unique upstream annealing region only
+                    [b_start, overlap_start) — the portion that does NOT appear in
+                    primer C (symmetric to tm_c_anneal, on B's side of the overlap)
 tm_overlap_fwd      Wallace Tm of overlap on forward strand
 tm_overlap_rc       Wallace Tm of overlap on reverse strand (always == fwd)
 """
@@ -63,7 +67,8 @@ class PrimerBCResult:
     b_end: int
     primer_b: str          # reverse complement — the actual oligo
     primer_b_fwd: str      # template-strand span (for position reference)
-    tm_b: float
+    tm_b: float             # Tm of the complete primer B (upstream annealing + overlap)
+    tm_b_anneal: float      # Tm of the unique annealing region [b_start, overlap_start)
 
     # Primer C (sense/forward; pairs with primer D for fragment "cd".
     # primer_c is the template-strand span itself, unmodified — no reverse
@@ -260,6 +265,7 @@ def design_bc_primers(
         primer_b=primer_b,
         primer_b_fwd=primer_b_fwd,
         tm_b=simple_tm(primer_b_fwd),
+        tm_b_anneal=simple_tm(mutated_seq[b_start:ov_start]),  # upstream-only portion
 
         c_start=ov_start,
         c_end=c_end,
