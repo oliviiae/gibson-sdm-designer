@@ -240,12 +240,20 @@ def _print_candidates(label: str, res, show_all: bool):
         print(f"  … and {len(cands)-limit} more (use --all-candidates to show all)")
 
 
-def _print_seq_with_cuts(seq: str, frag_start: int, cuts: list, unit: str = "this fragment"):
+def _print_seq_with_cuts(
+    seq: str, frag_start: int, cuts: list, unit: str = "this fragment",
+    mutation_ranges: list[tuple[int, int, str]] | None = None,
+):
     """
     Print seq with a caret marking each restriction enzyme's cut position.
     cuts: list of (cut_pos_1based_in_full_construct, enzyme_name_or_None).
     frag_start: 0-based absolute position where seq begins in the full
     construct (0 when seq itself IS the full construct).
+
+    mutation_ranges: optional list of (start_abs, end_abs, label) — 0-based
+    absolute [start, end) spans (e.g. a mutated codon) marked with '~' on a
+    second marker line, so a mutation's location can be shown alongside the
+    restriction cut sites it affects.
     """
     print(f"      {seq}")
     markers = [" "] * len(seq)
@@ -261,6 +269,21 @@ def _print_seq_with_cuts(seq: str, frag_start: int, cuts: list, unit: str = "thi
         print(f"      {''.join(markers)}".rstrip())
         for rel, label in sorted(labels):
             print(f"      {' ' * rel}└─ {label} cuts here (nt {rel} in {unit})")
+
+    range_markers = [" "] * len(seq)
+    range_labels = []
+    for start_abs, end_abs, label in (mutation_ranges or []):
+        rel_start = max(0, start_abs - frag_start)
+        rel_end = min(len(seq), end_abs - frag_start)
+        if rel_start >= rel_end:
+            continue
+        for idx in range(rel_start, rel_end):
+            range_markers[idx] = "~"
+        range_labels.append((rel_start, label))
+    if range_labels:
+        print(f"      {''.join(range_markers)}".rstrip())
+        for rel, label in sorted(range_labels):
+            print(f"      {' ' * rel}└─ {label} (nt {rel} in {unit})")
 
 
 def _collect_all_cut_sites(result) -> list[tuple[int | None, str | None]]:
@@ -426,16 +449,32 @@ def _print_formatted(result, show_all_candidates: bool):
             positions = ", ".join(str(p) for p in lost[enz])
             print(f"    − {enz:<10} lost at nt {positions} (wild type only)")
 
+        # Mutation/silent-mutation codon ranges, shown on both views (same
+        # coordinates, since substitutions don't shift length) so it's
+        # clear WHERE relative to the cut-site diff the actual edit(s) are.
+        orf_start = result.orf_start_detected
+        mutation_ranges = []
+        for pos in result.mutation_positions or []:
+            codon_start = orf_start + (pos - 1) * 3
+            mutation_ranges.append((codon_start, codon_start + 3, "target mutation"))
+        diag = result.diagnostic
+        if diag is not None and diag.source == "silent_mutation" and diag.silent_aa_index is not None:
+            codon_start = orf_start + (diag.silent_aa_index - 1) * 3
+            mutation_ranges.append((codon_start, codon_start + 3, "silent diagnostic mutation"))
+
         # Direct stacked comparison: wild type directly above mutant, each
-        # with only its diff sites marked, at matching coordinates, so the
-        # two lines can be read one against the other.
+        # with its diff sites (^) and the mutation site(s) (~) marked, at
+        # matching coordinates, so the two lines can be read one against
+        # the other.
         if result.original_sequence and result.mutated_sequence:
             wt_cuts = [(p, e) for e, ps in lost.items() for p in ps]
             mut_cuts = [(p, e) for e, ps in gained.items() for p in ps]
-            print(f"\n    Wild type  (- = site lost)")
-            _print_seq_with_cuts(result.original_sequence, 0, wt_cuts, unit="wild type")
-            print(f"\n    Mutant  (+ = site gained)")
-            _print_seq_with_cuts(result.mutated_sequence, 0, mut_cuts, unit="mutant")
+            print(f"\n    Wild type  (- = site lost, ~ = mutation site)")
+            _print_seq_with_cuts(result.original_sequence, 0, wt_cuts, unit="wild type",
+                                  mutation_ranges=mutation_ranges)
+            print(f"\n    Mutant  (+ = site gained, ~ = mutation site)")
+            _print_seq_with_cuts(result.mutated_sequence, 0, mut_cuts, unit="mutant",
+                                  mutation_ranges=mutation_ranges)
 
     # Primers
     print(f"\n  {_hr()}")

@@ -354,6 +354,7 @@ def _collect_all_cut_sites(result) -> list[tuple[int | None, str | None]]:
 def _render_seq_with_cuts(
     seq: str, frag_start: int, cuts: list[tuple[int | None, str | None]],
     unit: str = "this fragment", bg: str = "#fde8e8", fg: str = "#a33232",
+    mutation_ranges: list[tuple[int, int, str, str, str]] | None = None,
 ):
     """
     Render seq (monospace) with each restriction enzyme's cut site
@@ -362,36 +363,71 @@ def _render_seq_with_cuts(
     the 0-based absolute position where seq begins in the full construct
     (0 when seq itself IS the full construct). bg/fg let callers use a
     different highlight color (e.g. to distinguish gained vs lost sites).
+
+    mutation_ranges: optional list of (start_abs, end_abs, bg, fg, label) —
+    0-based absolute [start, end) spans (e.g. a mutated codon) highlighted
+    with their own color, in addition to the point cut-site markers, so a
+    mutation's location can be shown in the same view as the restriction
+    sites it affects. Builds one per-character style array up front so
+    overlapping/adjacent highlights never corrupt each other's HTML.
     """
-    marked = seq
-    labels = []
+    n = len(seq)
+    style: list[tuple[str, str] | None] = [None] * n
+    labels: list[tuple[int, str]] = []
+
     for cut_pos, enzyme in cuts:
         if cut_pos is None:
             continue
         rel = (cut_pos - 1) - frag_start
-        if 0 <= rel < len(seq):
+        if 0 <= rel < n:
+            if style[rel] is None:
+                style[rel] = (bg, fg)
             labels.append((rel, enzyme))
-    # Multiple enzymes can cut at the same position — wrap each unique
-    # position only once (in descending order so earlier insertions don't
-    # shift later indices). Wrapping the same index twice would splice into
-    # the already-inserted <span> tag itself, corrupting the HTML.
-    for rel in sorted({r for r, _ in labels}, reverse=True):
-        marked = (
-            marked[:rel]
-            + f'<span style="background:{bg};color:{fg};font-weight:700;">{marked[rel]}</span>'
-            + marked[rel + 1:]
-        )
+
+    range_labels: list[tuple[int, str]] = []
+    for start_abs, end_abs, rbg, rfg, rlabel in (mutation_ranges or []):
+        rel_start = max(0, start_abs - frag_start)
+        rel_end = min(n, end_abs - frag_start)
+        if rel_start >= rel_end:
+            continue
+        for idx in range(rel_start, rel_end):
+            style[idx] = (rbg, rfg)  # mutation ranges take priority over cut markers
+        range_labels.append((rel_start, rlabel))
+
+    out = []
+    i = 0
+    while i < n:
+        cur = style[i]
+        j = i + 1
+        while j < n and style[j] == cur:
+            j += 1
+        chunk = seq[i:j]
+        if cur is None:
+            out.append(chunk)
+        else:
+            cbg, cfg = cur
+            out.append(f'<span style="background:{cbg};color:{cfg};font-weight:700;">{chunk}</span>')
+        i = j
+    marked = "".join(out)
+
     st.markdown(
         f'<div style="font-family:monospace;font-size:0.85rem;word-break:break-all;'
         f'background:#F5F8F8;color:#1a2530;padding:0.6rem;border-radius:6px;">{marked}</div>',
         unsafe_allow_html=True,
     )
+    caption_parts = []
     if labels:
-        st.caption(
+        caption_parts.append(
             "Cut site(s): " + ", ".join(
                 f"{enzyme} at nt {rel} in {unit}" for rel, enzyme in sorted(labels)
             )
         )
+    if range_labels:
+        caption_parts.append(
+            ", ".join(f"{label} at nt {rel} in {unit}" for rel, label in sorted(range_labels))
+        )
+    if caption_parts:
+        st.caption("  ·  ".join(caption_parts))
 
 
 def _mark_dna_mutations(
@@ -575,21 +611,44 @@ def _render_cut_site_diff(result):
         use_container_width=True,
     )
 
+    # Mutation/silent-mutation codon ranges — shown in both the WT and
+    # mutant views (same coordinates, since substitutions don't shift
+    # length) so it's clear WHERE relative to the cut-site diff the actual
+    # edit(s) are.
+    orf_start = result.orf_start_detected
+    mutation_ranges = []
+    for pos in result.mutation_positions or []:
+        codon_start = orf_start + (pos - 1) * 3
+        mutation_ranges.append(
+            (codon_start, codon_start + 3, "#f3e6ff", "#6a3fa0", "target mutation")
+        )
+    d = result.diagnostic
+    if d is not None and d.source == "silent_mutation" and d.silent_aa_index is not None:
+        codon_start = orf_start + (d.silent_aa_index - 1) * 3
+        mutation_ranges.append(
+            (codon_start, codon_start + 3, "#cfe8ff", "#0b3d66", "silent diagnostic mutation")
+        )
+
     # Stacked direct comparison: wild type directly above mutant, each with
-    # only its diff sites marked (red = lost from WT, green = gained in
-    # mutant) — same sequence, same coordinates, so the two lines line up.
+    # its diff sites marked (red = lost from WT, green = gained in mutant)
+    # plus the mutation site(s) themselves (purple = target, light blue =
+    # silent diagnostic) — same sequence, same coordinates, so the two
+    # lines line up.
     if result.original_sequence and result.mutated_sequence:
         wt_cuts = [(pos, enz) for enz, positions in lost.items() for pos in positions]
         mut_cuts = [(pos, enz) for enz, positions in gained.items() for pos in positions]
-        st.caption("Wild type (red = site lost)")
+        caption_note = " · purple = target mutation"
+        if any(r[4] == "silent diagnostic mutation" for r in mutation_ranges):
+            caption_note += " · light blue = silent diagnostic mutation"
+        st.caption("Wild type (red = site lost" + caption_note + ")")
         _render_seq_with_cuts(
             result.original_sequence, 0, wt_cuts, unit="wild type",
-            bg="#fde8e8", fg="#a33232",
+            bg="#fde8e8", fg="#a33232", mutation_ranges=mutation_ranges,
         )
-        st.caption("Mutant (green = site gained)")
+        st.caption("Mutant (green = site gained" + caption_note + ")")
         _render_seq_with_cuts(
             result.mutated_sequence, 0, mut_cuts, unit="mutant",
-            bg="#e3f7e6", fg="#227a3d",
+            bg="#e3f7e6", fg="#227a3d", mutation_ranges=mutation_ranges,
         )
 
 
