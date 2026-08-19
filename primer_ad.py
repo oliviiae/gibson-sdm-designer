@@ -155,12 +155,25 @@ def design_flanking_primer(
     protocol, so none is enforced here — except in the extended-Tm fallback,
     where an A/T 3' end is what makes the higher Tm acceptable.
 
+    Orientation: primer A anneals to the template as the forward primer, so
+    its oligo is the template-strand span unmodified. Primer D sits at the
+    far (downstream) end of fragment "cd" and must close that PCR product
+    back toward primer C, so its real oligo is the reverse complement of
+    the template-strand span — matching primer B's role relative to A (see
+    primer_bc.py). The A/T-terminus check for the extended-Tm fallback is
+    applied to this final, correctly-oriented oligo's actual 3' base, not
+    the template-strand span's last character (which, for primer D, is not
+    the same base after reverse-complementing).
+
     Returns
     -------
     (primer_seq, start, end, tm, extended_tm) if a length in [min_len, max_len]
     satisfies the length requirement and either lands Tm in the normal
     48-54°C window (extended_tm=False), or lands Tm in (54, extended_tm_max]
-    with a 3' A/T base (extended_tm=True).
+    with a 3' A/T base (extended_tm=True). primer_seq is the actual oligo to
+    order — reverse-complemented already for primer D. start/end always
+    describe the template-strand span (needed for fragment position math),
+    regardless of primer_seq's orientation.
     None if no such length exists (e.g. the local sequence is so AT-rich or
     GC-rich that no length in range hits the target Tm) — callers should
     treat this restriction site as unusable, not silently accept an
@@ -178,8 +191,9 @@ def design_flanking_primer(
             start, end = cut_pos + 1 - length, cut_pos + 1
             if start < 0:
                 break
-        primer = seq[start:end]
-        tm = simple_tm(primer)
+        primer_fwd = seq[start:end]
+        primer = primer_fwd if direction == 1 else str(Seq(primer_fwd).reverse_complement())
+        tm = simple_tm(primer_fwd)  # orientation-invariant under the Wallace rule
         if tm_lo <= tm <= tm_hi:
             return primer, start, end, tm, False
         if (

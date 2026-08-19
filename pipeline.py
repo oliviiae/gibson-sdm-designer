@@ -251,17 +251,20 @@ def _locate_user_primer(working_seq: str, primer_seq: str, label: str) -> tuple[
     """
     Find a user-supplied primer A/D sequence within working_seq.
 
-    Tries the sequence as given first (matches how the tool stores an
-    auto-designed primer A/D: a literal sense-strand substring), then its
-    reverse complement (since a real D primer is normally ordered as the
-    antisense oligo, and a user might paste it that way). Tm is orientation-
-    invariant (a sequence and its reverse complement have identical G/C and
-    A/T counts under the Wallace rule), so either match is equally valid —
-    only the located span in working_seq matters downstream.
+    Tries the sequence as given first, then its reverse complement, since a
+    user might paste either orientation. Either match is equally valid for
+    locating the span — Tm is orientation-invariant (a sequence and its
+    reverse complement have identical G/C and A/T counts under the Wallace
+    rule) — but the oligo actually stored/displayed is always normalized to
+    the orientation that primer needs: primer A is the forward primer, so
+    its oligo is the template-strand span unmodified; primer D closes
+    fragment "cd" back toward C and so is the reverse primer — its real
+    oligo is the reverse complement of the template-strand span, regardless
+    of which orientation the user happened to paste.
 
-    Returns (start, end, seq_as_stored) — seq_as_stored is the literal
-    substring of working_seq at [start, end), for consistency with how
-    auto-designed primers are represented internally.
+    Returns (start, end, seq_as_stored) — start/end describe the template-
+    strand span (needed for fragment position math); seq_as_stored is the
+    correctly-oriented oligo for that primer's role.
     """
     primer_seq = primer_seq.upper().strip()
     if not primer_seq:
@@ -286,10 +289,14 @@ def _locate_user_primer(working_seq: str, primer_seq: str, label: str) -> tuple[
 
     if fwd_count == 1:
         start = working_seq.index(primer_seq)
-        return start, start + len(primer_seq), primer_seq
+        end = start + len(primer_seq)
     else:
         start = working_seq.index(revcomp)
-        return start, start + len(revcomp), revcomp
+        end = start + len(revcomp)
+
+    template_span = working_seq[start:end]
+    seq_as_stored = template_span if label == "A" else str(Seq(template_span).reverse_complement())
+    return start, end, seq_as_stored
 
 
 def _silent_mutation_seq(
