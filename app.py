@@ -363,7 +363,7 @@ def _render_seq_with_cuts(
         )
     st.markdown(
         f'<div style="font-family:monospace;font-size:0.85rem;word-break:break-all;'
-        f'background:#F5F8F8;padding:0.6rem;border-radius:6px;">{marked}</div>',
+        f'background:#F5F8F8;color:#1a2530;padding:0.6rem;border-radius:6px;">{marked}</div>',
         unsafe_allow_html=True,
     )
     if labels:
