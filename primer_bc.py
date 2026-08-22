@@ -233,18 +233,36 @@ def design_bc_primers(
         tm_range=tm_range,
     )
 
-    # c_end was walked independently, before the overlap was known. If the
-    # overlap ends up extending as far as (or past) c_end — which a larger
-    # min_overlap makes more likely — primer C would have zero unique
-    # annealing bases beyond the shared overlap: it wouldn't actually bind
-    # fresh template at all, and couldn't function as a real primer. Treat
-    # that the same as any other unsatisfiable design, not a silent Tm=0.
+    # c_end was walked independently, before the overlap was known — from
+    # c_anchor (right after the last mutated base), not from wherever the
+    # overlap actually ends up starting. Usually the overlap starts at (or
+    # very near) b_start and this is fine. But find_bc_overlap can slide the
+    # overlap's start considerably further right (up to max_start_shift) when
+    # local sequence composition near b_start won't support a valid G/C-
+    # terminated, in-range-Tm window — and when it does, the overlap can end
+    # up extending past the independently-computed c_end, leaving primer C
+    # with zero unique annealing bases: it wouldn't actually bind fresh
+    # template, and couldn't function as a real primer. Rather than failing
+    # outright here (this was previously a hard error, even though the
+    # mutation itself is perfectly designable), re-walk c_end starting from
+    # the overlap's actual end — the same Tm/G-C walk, just anchored where
+    # primer C's unique region would really begin.
     if ov_end >= c_end:
-        raise RuntimeError(
-            f"Overlap end (position {ov_end}) reached or passed primer C's "
-            f"end (position {c_end}), leaving no unique annealing region for "
-            f"primer C. Try a smaller --min-overlap."
+        _, _, c_end, _ = walk_to_tm(
+            mutated_seq,
+            anchor_pos=min(len(mutated_seq) - 1, ov_end),
+            direction=1,
+            tm_range=tm_range,
+            must_end_gc=True,
         )
+        if ov_end >= c_end:
+            raise RuntimeError(
+                f"Overlap end (position {ov_end}) reached or passed primer C's "
+                f"end (position {c_end}) even after re-anchoring the search at "
+                f"the overlap's actual end, leaving no unique annealing region "
+                f"for primer C. Try a smaller --min-overlap, or the construct "
+                f"may not have enough sequence left downstream."
+            )
 
     # --- Step 4: build primer sequences --------------------------------------
     # Primer B pairs with A for fragment "ab" and sits at that fragment's far
