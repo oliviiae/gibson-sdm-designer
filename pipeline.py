@@ -633,11 +633,34 @@ def design_mutation_primers(
                     )
                     break
 
+        # ── Part 4 (moved earlier): preliminary B/C primer design ─────────────
+        # Run now, on working_seq as of the direct-mutation/alt-codon step
+        # above (before any silent mutation is chosen), so the silent-
+        # mutation search below can be constrained to the region that will
+        # actually end up inside primer B or C's own synthesized sequence.
+        # A nucleotide change outside [b_start, c_end) — even though it's
+        # applied to this in-silico "mutated_seq" — is not part of any
+        # primer's oligo and so would never actually appear in a real PCR
+        # product; only bases within the primer itself get synthesized as
+        # written, everything else is copied from the (unmutated) template
+        # by the polymerase. The target mutation itself is always safe here
+        # (find_bc_overlap guarantees the overlap covers it, and the overlap
+        # is shared by both B and C), but a silent diagnostic mutation
+        # elsewhere has no such guarantee unless explicitly constrained.
+        try:
+            bc = design_bc_primers(working_seq, changed_pos, tm_range, min_overlap)
+        except RuntimeError as exc:
+            raise _PipelineError(f"B/C primer design failed: {exc}") from exc
+
         if diagnostic is None:
             # Search for a silent mutation, widening the window outward from
             # the mutation codon until a hit is found or the cap is reached.
             # Capped (default 150 nt each side ≈ 50 codons) so the diagnostic
             # site stays close enough to the mutation to be a useful screen.
+            # Additionally clamped to [bc.b_start, bc.c_end) — the actual
+            # combined span of primer B and C's own sequences — so a
+            # candidate outside that range is never even considered; see the
+            # note above the preliminary B/C design for why.
             silent_hits: list = []
             flank = silent_window_flank
             searched_flank = flank
@@ -667,12 +690,13 @@ def design_mutation_primers(
             clean_hit = None
             best_unclean_hit = None  # best-effort fallback if nothing clean turns up
             while flank <= max_silent_search_flank:
-                near = span_start - flank
-                far  = span_end + flank
-                silent_hits = find_silent_restriction_sites(
-                    mutated_seq, orf_start, max(0, near), min(len(mutated_seq), far)
-                )
+                near = max(bc.b_start, span_start - flank)
+                far  = min(bc.c_end, span_end + flank)
                 searched_flank = flank
+                silent_hits = (
+                    find_silent_restriction_sites(mutated_seq, orf_start, near, far)
+                    if near < far else []
+                )
                 if silent_hits and best_unclean_hit is None:
                     best_unclean_hit = silent_hits[0]
                 for candidate in silent_hits:
@@ -681,7 +705,11 @@ def design_mutation_primers(
                         break
                 if clean_hit is not None:
                     break
-                if flank >= max_silent_search_flank:
+                # Once the search window has been clamped all the way out to
+                # [b_start, c_end) on both sides, widening the flank further
+                # can't find anything new — stop instead of looping forever
+                # at a no-op window.
+                if flank >= max_silent_search_flank or (near <= bc.b_start and far >= bc.c_end):
                     break
                 # max(flank, 1) guards against an infinite loop when flank
                 # starts at 0 (0 * 3 == 0 forever).
@@ -689,51 +717,74 @@ def design_mutation_primers(
 
             hit = clean_hit or best_unclean_hit
             if hit is not None:
-                diagnostic = DiagnosticInfo(
-                    enzyme=hit["enzyme"],
-                    effect=hit["effect"],
-                    source="silent_mutation",
-                    silent_aa_index=hit["aa_index"],
-                    silent_original_codon=hit["original_codon"],
-                    silent_new_codon=hit["new_codon"],
-                    silent_changes=hit["changes"],
-                )
-                working_seq = _silent_mutation_seq(
+                candidate_seq = _silent_mutation_seq(
                     mutated_seq, hit["position"], hit["new_codon"]
                 )
-                if searched_flank > silent_window_flank:
-                    result.warnings.append(
-                        f"Diagnostic site required widening the silent-mutation "
-                        f"search to ±{searched_flank} nt (default ±{silent_window_flank} nt) "
-                        f"to find {hit['enzyme']}."
+                # Re-run B/C design on the sequence WITH the silent mutation
+                # applied — adding a base can shift local Tm enough to move
+                # b_start/c_end slightly, so the boundaries used everywhere
+                # downstream (A/D windows, reported Tms) must reflect the
+                # construct as it will actually be ordered, not the
+                # pre-silent-mutation preliminary design.
+                try:
+                    bc_final = design_bc_primers(candidate_seq, changed_pos, tm_range, min_overlap)
+                except RuntimeError:
+                    bc_final = None
+
+                silent_codon_start = orf_start + (hit["aa_index"] - 1) * 3
+                if bc_final is not None and bc_final.b_start <= silent_codon_start < bc_final.c_end:
+                    bc = bc_final
+                    working_seq = candidate_seq
+                    diagnostic = DiagnosticInfo(
+                        enzyme=hit["enzyme"],
+                        effect=hit["effect"],
+                        source="silent_mutation",
+                        silent_aa_index=hit["aa_index"],
+                        silent_original_codon=hit["original_codon"],
+                        silent_new_codon=hit["new_codon"],
+                        silent_changes=hit["changes"],
                     )
-                if clean_hit is None:
+                    if searched_flank > silent_window_flank:
+                        result.warnings.append(
+                            f"Diagnostic site required widening the silent-mutation "
+                            f"search to ±{searched_flank} nt (default ±{silent_window_flank} nt) "
+                            f"to find {hit['enzyme']}."
+                        )
+                    if clean_hit is None:
+                        result.warnings.append(
+                            f"No diagnostic enzyme within ±{searched_flank} nt was confirmed "
+                            f"globally unique in the construct — {hit['enzyme']} was used as "
+                            f"the best available option, but it may cut elsewhere unrelated "
+                            f"to this mutation, making a simple digest unreliable as a "
+                            f"pass/fail screen. Consider verifying by sequencing instead, or "
+                            f"widen the search further."
+                        )
+                else:
+                    # Applying the silent mutation shifted B/C's boundaries
+                    # enough that the site is no longer actually inside
+                    # either primer — using it would report a diagnostic
+                    # that could never really appear in the PCR product.
+                    # Fall back to reporting no diagnostic rather than
+                    # shipping a design that can't be trusted.
                     result.warnings.append(
-                        f"No diagnostic enzyme within ±{searched_flank} nt was confirmed "
-                        f"globally unique in the construct — {hit['enzyme']} was used as "
-                        f"the best available option, but it may cut elsewhere unrelated "
-                        f"to this mutation, making a simple digest unreliable as a "
-                        f"pass/fail screen. Consider verifying by sequencing instead, or "
-                        f"widen the search further."
+                        f"A candidate diagnostic silent mutation ({hit['enzyme']}) was found, "
+                        f"but applying it moved primer B/C's boundaries so the site would no "
+                        f"longer actually be included in either primer's sequence — discarding "
+                        f"it rather than reporting an unreliable diagnostic. Restriction "
+                        f"verification will be skipped."
                     )
             else:
                 result.warnings.append(
                     f"No diagnostic restriction site found within ±{searched_flank} nt "
-                    f"of the mutation (mutation itself gains/loses no site, and no "
-                    f"1-codon silent option creates one nearby). "
-                    "Restriction verification will be skipped."
+                    f"of the mutation, inside primer B/C's own span (mutation itself "
+                    f"gains/loses no site, and no 1-codon silent option nearby creates "
+                    f"one that would actually be part of either primer). Restriction "
+                    "verification will be skipped."
                 )
 
         result.diagnostic = diagnostic
         result.mutated_sequence = working_seq
         result.cut_site_diff = gained_lost_sites(sequence, working_seq)
-
-        # ── Part 4: B/C primers ───────────────────────────────────────────────
-        try:
-            bc = design_bc_primers(working_seq, changed_pos, tm_range, min_overlap)
-        except RuntimeError as exc:
-            raise _PipelineError(f"B/C primer design failed: {exc}") from exc
-
         result.bc_result = bc
         result.overlap_seq = bc.overlap_seq
         result.overlap_tm  = bc.tm_overlap_fwd
@@ -753,6 +804,30 @@ def design_mutation_primers(
             start=bc.c_start,
             end=bc.c_end,
         )
+
+        # Primer B/C's unique annealing region (outside the shared overlap)
+        # is what actually binds fresh template each PCR cycle. A very weak
+        # or absent one is a real functional risk, not just noise — flag it.
+        if bc.tm_b_anneal <= 0:
+            result.warnings.append(
+                "Primer B has no unique annealing bases beyond the shared "
+                "overlap — it may not bind fresh template reliably."
+            )
+        elif bc.tm_b_anneal < tm_range[0]:
+            result.warnings.append(
+                f"Primer B's unique annealing Tm ({bc.tm_b_anneal:.0f}°C) is "
+                f"below the target {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
+            )
+        if bc.tm_c_anneal <= 0:
+            result.warnings.append(
+                "Primer C has no unique annealing bases beyond the shared "
+                "overlap — it may not bind fresh template reliably."
+            )
+        elif bc.tm_c_anneal < tm_range[0]:
+            result.warnings.append(
+                f"Primer C's unique annealing Tm ({bc.tm_c_anneal:.0f}°C) is "
+                f"below the target {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
+            )
 
         # ── Part 5: A/D primers ───────────────────────────────────────────────
         # If the user supplied their own primer A and/or D sequence, that side
