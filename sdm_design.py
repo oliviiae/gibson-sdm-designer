@@ -327,6 +327,42 @@ def _bracket_spans_styled(seq: str, spans: list[tuple[int, int, str, str]]) -> s
     return out
 
 
+def _mark_primer_mutations(
+    oligo_seq: str,
+    is_rc: bool,
+    template_start: int,
+    template_end: int,
+    changed_positions: list[int],
+    silent_range: tuple[int, int, str, str] | None = None,
+) -> str:
+    """
+    Bracket the mutated nucleotide(s) within a primer B/C oligo — [x] for
+    the target mutation, {x} for a silent diagnostic mutation — mirroring
+    the mutated-region view, so it's easy to confirm the primer actually
+    carries the intended edit(s). oligo_seq is the primer as displayed/
+    ordered: the literal template-strand span for primer C (is_rc=False),
+    or its reverse complement for primer B (is_rc=True). Mapping an
+    absolute template position to an index in oligo_seq: for C (literal),
+    index = abs_pos - template_start; for B (reverse complemented), the
+    string is reversed and complemented, so the base at abs_pos ends up at
+    index (template_end - 1 - abs_pos).
+    """
+    spans = []
+    for pos in changed_positions:
+        if template_start <= pos < template_end:
+            idx = (template_end - 1 - pos) if is_rc else (pos - template_start)
+            spans.append((idx, idx + 1, "[", "]"))
+    if silent_range is not None:
+        codon_start, codon_end, orig_codon, new_codon = silent_range
+        for offset in range(codon_end - codon_start):
+            if offset < len(orig_codon) and offset < len(new_codon) and orig_codon[offset] != new_codon[offset]:
+                pos = codon_start + offset
+                if template_start <= pos < template_end:
+                    idx = (template_end - 1 - pos) if is_rc else (pos - template_start)
+                    spans.append((idx, idx + 1, "{", "}"))
+    return _bracket_spans_styled(oligo_seq, spans)
+
+
 def _print_mutated_region(result, aa_flank: int = 15):
     """
     Print the mutated ORF's DNA and translated protein for a window around
@@ -498,17 +534,34 @@ def _print_formatted(result, show_all_candidates: bool):
     else:
         print("    A  (not found)")
 
+    silent_range = None
+    d = result.diagnostic
+    if d is not None and d.source == "silent_mutation" and d.silent_aa_index is not None:
+        cs = result.orf_start_detected + (d.silent_aa_index - 1) * 3
+        silent_range = (cs, cs + 3, d.silent_original_codon, d.silent_new_codon)
+
     if result.primer_B:
         pb = result.primer_B
-        tm_note = (f"Tm={pb.tm:.0f}°C full / "
-                   f"{pb.tm_anneal:.0f}°C anneal")
-        print(f"    B  {tm_note}  {pb.sequence}  (antisense / reverse)")
+        marked = _mark_primer_mutations(
+            pb.sequence, is_rc=True, template_start=pb.start, template_end=pb.end,
+            changed_positions=result.changed_positions, silent_range=silent_range,
+        )
+        _prow("B", marked, pb.tm_anneal, "(antisense / reverse)")
 
     if result.primer_C:
         pc = result.primer_C
-        tm_note = (f"Tm={pc.tm:.0f}°C full / "
-                   f"{pc.tm_anneal:.0f}°C anneal")
-        print(f"    C  {tm_note}  {pc.sequence}  (sense / forward)")
+        marked = _mark_primer_mutations(
+            pc.sequence, is_rc=False, template_start=pc.start, template_end=pc.end,
+            changed_positions=result.changed_positions, silent_range=silent_range,
+        )
+        _prow("C", marked, pc.tm_anneal, "(sense / forward)")
+
+    if result.primer_B or result.primer_C:
+        note = "target mutation in [brackets]"
+        if silent_range is not None:
+            note += ", silent diagnostic mutation in {braces}"
+        print(f"         ({note}; B/C Tm shown is the priming/anneal region only, "
+              f"not the shared overlap)")
 
     if result.primer_D:
         pd = result.primer_D

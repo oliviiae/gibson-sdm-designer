@@ -303,6 +303,70 @@ mode = st.radio("Mode", ["Design a mutation", "Scan for designable positions"],
 st.write("")
 
 
+def _mark_primer_mutations(
+    oligo_seq: str,
+    is_rc: bool,
+    template_start: int,
+    template_end: int,
+    changed_positions: list[int],
+    silent_range: tuple[int, int, str, str] | None = None,
+) -> str:
+    """
+    Highlight the mutated nucleotide(s) within a primer B/C oligo, the same
+    yellow/light-blue scheme used in the mutated-region view — so it's easy
+    to visually confirm the primer actually carries the intended edit(s).
+
+    oligo_seq is the primer as displayed/ordered: the literal template-
+    strand span for primer C (is_rc=False), or its reverse complement for
+    primer B (is_rc=True). changed_positions are absolute 0-based nt
+    positions of the target mutation (from result.changed_positions).
+    silent_range, if given, is (codon_start_abs, codon_end_abs,
+    original_codon, new_codon) for the silent diagnostic mutation, and only
+    its actually-differing base(s) within that codon are highlighted.
+
+    Mapping from an absolute template position to an index in oligo_seq:
+    for C (literal), index = abs_pos - template_start; for B (reverse
+    complemented), the string is reversed and complemented, so the base at
+    abs_pos ends up at index (template_end - 1 - abs_pos).
+    """
+    n = len(oligo_seq)
+    styles: list[str | None] = [None] * n
+
+    def _mark(abs_pos: int, style: str):
+        if not (template_start <= abs_pos < template_end):
+            return
+        idx = (template_end - 1 - abs_pos) if is_rc else (abs_pos - template_start)
+        if 0 <= idx < n:
+            styles[idx] = style
+
+    for pos in changed_positions:
+        _mark(pos, "target")
+
+    if silent_range is not None:
+        codon_start, codon_end, orig_codon, new_codon = silent_range
+        for offset in range(codon_end - codon_start):
+            if offset < len(orig_codon) and offset < len(new_codon) and orig_codon[offset] != new_codon[offset]:
+                _mark(codon_start + offset, "silent")
+
+    out = []
+    for ch, style in zip(oligo_seq, styles):
+        if style == "target":
+            out.append(
+                '<span style="background:#ffd43b;color:#7a4a00;'
+                'font-weight:800;border-radius:3px;padding:0 1px;">'
+                f"{ch}</span>"
+            )
+        elif style == "silent":
+            out.append(
+                '<span style="background:#cfe8ff;color:#0b3d66;'
+                'font-weight:800;border-radius:3px;padding:0 1px;">'
+                f"{ch}</span>"
+            )
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _bracket_spans(seq: str, spans: list[tuple[int, int]]) -> str:
     """Wrap each [start, end) span in seq with [ ]. spans may be unsorted/adjacent."""
     out = seq
@@ -683,35 +747,70 @@ def _render_result(result, key_prefix=""):
     _render_cut_site_diff(result)
 
     st.markdown('<div class="section-label">Primers (5\' → 3\')</div>', unsafe_allow_html=True)
+    # rows: plain-text (label, sequence, tm, note) — used for the downloadable
+    # report. rows_html: same but with B/C's mutated nucleotide(s) highlighted
+    # (yellow = target mutation, light blue = silent diagnostic mutation),
+    # rendered via HTML since st.dataframe can't display markup in a cell.
     rows = []
+    rows_html = []
+
+    silent_range = None
+    d = result.diagnostic
+    if d is not None and d.source == "silent_mutation" and d.silent_aa_index is not None:
+        orf_start = result.orf_start_detected
+        codon_start = orf_start + (d.silent_aa_index - 1) * 3
+        silent_range = (codon_start, codon_start + 3, d.silent_original_codon, d.silent_new_codon)
+
     if result.primer_A:
         pa = result.primer_A
         note = "user-supplied" if pa.enzyme is None else \
                f"{pa.enzyme}  ·  {_neb_tag(pa.enzyme)}  ·  cut {pa.cut_pos}"
         rows.append(["A", pa.sequence, f"{pa.tm:.0f}°C", note])
+        rows_html.append(["A", f"<code>{pa.sequence}</code>", f"{pa.tm:.0f}°C", note])
     if result.primer_B:
         pb = result.primer_B
-        rows.append(["B", pb.sequence,
-                     f"{pb.tm:.0f}°C full / {pb.tm_anneal:.0f}°C anneal",
-                     "antisense (reverse)"])
+        tm_str = f"{pb.tm_anneal:.0f}°C"
+        marked = _mark_primer_mutations(
+            pb.sequence, is_rc=True, template_start=pb.start, template_end=pb.end,
+            changed_positions=result.changed_positions, silent_range=silent_range,
+        )
+        rows.append(["B", pb.sequence, tm_str, "antisense (reverse)"])
+        rows_html.append(["B", f"<code>{marked}</code>", tm_str, "antisense (reverse)"])
     if result.primer_C:
         pc = result.primer_C
-        rows.append(["C", pc.sequence,
-                     f"{pc.tm:.0f}°C full / {pc.tm_anneal:.0f}°C anneal",
-                     "sense (forward)"])
+        tm_str = f"{pc.tm_anneal:.0f}°C"
+        marked = _mark_primer_mutations(
+            pc.sequence, is_rc=False, template_start=pc.start, template_end=pc.end,
+            changed_positions=result.changed_positions, silent_range=silent_range,
+        )
+        rows.append(["C", pc.sequence, tm_str, "sense (forward)"])
+        rows_html.append(["C", f"<code>{marked}</code>", tm_str, "sense (forward)"])
     if result.primer_D:
         pd = result.primer_D
         note = "user-supplied" if pd.enzyme is None else \
                f"{pd.enzyme}  ·  {_neb_tag(pd.enzyme)}  ·  cut {pd.cut_pos}"
         rows.append(["D", pd.sequence, f"{pd.tm:.0f}°C", note])
-    st.dataframe(
-        {"Primer": [r[0] for r in rows],
-         "Sequence": [r[1] for r in rows],
-         "Tm": [r[2] for r in rows],
-         "Notes": [r[3] for r in rows]},
-        hide_index=True,
-        use_container_width=True,
+        rows_html.append(["D", f"<code>{pd.sequence}</code>", f"{pd.tm:.0f}°C", note])
+
+    table_rows = "".join(
+        f'<tr><td style="padding:0.35rem 0.6rem;font-weight:600;">{r[0]}</td>'
+        f'<td style="padding:0.35rem 0.6rem;font-family:monospace;word-break:break-all;">{r[1]}</td>'
+        f'<td style="padding:0.35rem 0.6rem;white-space:nowrap;">{r[2]}</td>'
+        f'<td style="padding:0.35rem 0.6rem;color:#667380;">{r[3]}</td></tr>'
+        for r in rows_html
     )
+    st.markdown(
+        '<div class="result-card" style="padding:0.4rem 0.2rem;">'
+        '<table style="width:100%;border-collapse:collapse;font-size:0.88rem;">'
+        f'{table_rows}</table></div>',
+        unsafe_allow_html=True,
+    )
+    if result.primer_B or result.primer_C:
+        note = "Yellow = target mutation nucleotide(s)"
+        if silent_range is not None:
+            note += " · light blue = silent diagnostic mutation nucleotide(s)"
+        note += ". B/C Tm shown is the priming (unique annealing) region only, not including the shared overlap."
+        st.caption(note)
 
     st.markdown('<div class="section-label">Overlap &amp; fragments</div>', unsafe_allow_html=True)
     frag_html = (
