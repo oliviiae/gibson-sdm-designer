@@ -84,6 +84,52 @@ def count_sites(seq: str, enzyme_name: str) -> list[int]:
     return raw.get(enz, [])
 
 
+def predict_gel_bands(
+    seq: str, enzyme_name: str, circular: bool = True,
+) -> list[int]:
+    """
+    Predicted fragment sizes (bp) from digesting seq with one named enzyme
+    — what would actually run on a gel. Most cloning plasmids are
+    maintained and digested as circular molecules, so this defaults to
+    circular topology: a site straddling the sequence's start/end (the
+    origin, as stored in this linear FASTA representation) is still found,
+    and the fragment "wrapping around" the origin is computed correctly.
+
+    Band count follows real digest topology:
+      0 cut sites  -> one band, the whole (uncut) length
+      1 cut site   -> one band, the whole length (a single cut just
+                      linearizes a circular molecule — no size change)
+      N>=2 sites   -> N bands, from the gaps between consecutive cut
+                      positions (including the wrap-around gap for
+                      circular topology)
+    For circular=False (a genuinely linear construct), N cut sites always
+    give N+1 fragments instead, with no wrap-around gap.
+
+    Returns band sizes sorted largest-first (how they'd run on a gel, top
+    to bottom), or [] if the enzyme name isn't recognized.
+    """
+    enz = _ENZYME_BY_NAME.get(enzyme_name)
+    if enz is None:
+        return []
+    analysis = Analysis(RestrictionBatch([enz]), Seq(seq), linear=not circular)
+    raw = analysis.full()
+    cuts = sorted(raw.get(enz, []))
+    n = len(seq)
+
+    if not cuts:
+        return [n]
+    if circular and len(cuts) == 1:
+        return [n]
+
+    bands = [b - a for a, b in zip(cuts, cuts[1:])]
+    if circular:
+        bands.append(n - cuts[-1] + cuts[0])
+    else:
+        bands.insert(0, cuts[0])
+        bands.append(n - cuts[-1])
+    return sorted(bands, reverse=True)
+
+
 def gained_lost_sites(
     seq_before: str,
     seq_after: str,

@@ -24,7 +24,7 @@ from codon_utils import find_codon_and_mutate, ranked_codon_options, apply_codon
 from primer_bc import design_bc_primers, PrimerBCResult
 from primer_ad import design_ad_primers, FlankingPrimerResult, CandidateSite, PREFERRED_ENZYMES
 from tm_utils import simple_tm
-from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites, count_sites
+from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites, count_sites, predict_gel_bands
 from assembly import (
     assemble_product,
     translate_orf,
@@ -95,6 +95,14 @@ class PipelineResult:
     #    diagnostic) — {"gained": {enzyme: [1-based positions in mutated
     #    seq]}, "lost": {enzyme: [1-based positions in wild-type seq]}}
     cut_site_diff: dict = field(default_factory=lambda: {"gained": {}, "lost": {}})
+
+    # ── Predicted gel bands for the diagnostic enzyme, whole-construct
+    #    digest (bp, largest first) — what the diagnostic digest is actually
+    #    expected to look like on a gel, wild type vs mutant. Assumes
+    #    circular plasmid topology (the normal case for a cloning vector);
+    #    empty if there's no diagnostic enzyme.
+    wt_gel_bands: list[int] = field(default_factory=list)
+    mutant_gel_bands: list[int] = field(default_factory=list)
 
     # ── Fragment sizes ────────────────────────────────────────────────────
     frag_ab_bp: int = 0
@@ -785,6 +793,9 @@ def design_mutation_primers(
         result.diagnostic = diagnostic
         result.mutated_sequence = working_seq
         result.cut_site_diff = gained_lost_sites(sequence, working_seq)
+        if diagnostic is not None:
+            result.wt_gel_bands = predict_gel_bands(sequence, diagnostic.enzyme)
+            result.mutant_gel_bands = predict_gel_bands(working_seq, diagnostic.enzyme)
         result.bc_result = bc
         result.overlap_seq = bc.overlap_seq
         result.overlap_tm  = bc.tm_overlap_fwd
@@ -1101,6 +1112,7 @@ def result_to_dict(r: PipelineResult) -> dict[str, Any]:
         overlap=dict(sequence=r.overlap_seq, tm=r.overlap_tm),
         diagnostic=_diag(r.diagnostic),
         cut_site_diff=r.cut_site_diff,
+        gel_bands=dict(wild_type=r.wt_gel_bands, mutant=r.mutant_gel_bands),
         fragment_lengths=dict(ab=r.frag_ab_bp, cd=r.frag_cd_bp, ad=r.frag_ad_bp),
         fragment_sequences=dict(ab=r.frag_ab_seq, cd=r.frag_cd_seq, ad=r.frag_ad_seq),
         verification=dict(

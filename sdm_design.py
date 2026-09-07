@@ -468,6 +468,20 @@ def _print_formatted(result, show_all_candidates: bool):
                f"{d.silent_changes} nt change)")
         print(f"    Enzyme : {d.enzyme}  —  site {d.effect.upper()}  {src}")
 
+        if result.wt_gel_bands or result.mutant_gel_bands:
+            wt_str  = " + ".join(f"{b:,} bp" for b in result.wt_gel_bands)
+            mut_str = " + ".join(f"{b:,} bp" for b in result.mutant_gel_bands)
+            print(f"\n    Predicted gel bands  (whole-plasmid digest, circular)")
+            print(f"      Wild type  ({len(result.wt_gel_bands)} band"
+                  f"{'s' if len(result.wt_gel_bands) != 1 else ''}):  {wt_str}")
+            print(f"      Mutant     ({len(result.mutant_gel_bands)} band"
+                  f"{'s' if len(result.mutant_gel_bands) != 1 else ''}):  {mut_str}")
+            if len(result.wt_gel_bands) <= 1 or len(result.mutant_gel_bands) <= 1:
+                print(f"      Note: a single-band result of the whole plasmid length "
+                      f"can mean either 0 cut sites (still circular/supercoiled) or "
+                      f"exactly 1 (linearized) — same reported size, but these run "
+                      f"differently on a real gel.")
+
     # Cutting pattern diff: every NEB enzyme gained/lost anywhere in the
     # construct, wild type vs mutant — not just the one enzyme picked above
     # as the diagnostic, so you can see the full restriction-map impact of

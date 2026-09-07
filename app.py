@@ -743,6 +743,32 @@ def _render_result(result, key_prefix=""):
     )
     st.markdown(f'<div class="result-card">{rows_html}</div>', unsafe_allow_html=True)
 
+    if result.wt_gel_bands or result.mutant_gel_bands:
+        st.markdown(
+            '<div class="section-label">Predicted gel bands '
+            '(whole-plasmid digest, circular)</div>',
+            unsafe_allow_html=True,
+        )
+        wt_str = " + ".join(f"{b:,} bp" for b in result.wt_gel_bands)
+        mut_str = " + ".join(f"{b:,} bp" for b in result.mutant_gel_bands)
+        gel_html = (
+            f'<div class="kv-row"><span class="kv-label">Wild type '
+            f'({len(result.wt_gel_bands)} band'
+            f'{"s" if len(result.wt_gel_bands) != 1 else ""})</span>'
+            f'<span class="kv-value">{wt_str}</span></div>'
+            f'<div class="kv-row"><span class="kv-label">Mutant '
+            f'({len(result.mutant_gel_bands)} band'
+            f'{"s" if len(result.mutant_gel_bands) != 1 else ""})</span>'
+            f'<span class="kv-value">{mut_str}</span></div>'
+        )
+        st.markdown(f'<div class="result-card">{gel_html}</div>', unsafe_allow_html=True)
+        if len(result.wt_gel_bands) <= 1 or len(result.mutant_gel_bands) <= 1:
+            st.caption(
+                "A single-band result of the whole plasmid length can mean either "
+                "0 cut sites (still circular/supercoiled) or exactly 1 (linearized) "
+                "— same reported size, but these run differently on a real gel."
+            )
+
     _render_mutated_region(result)
     _render_cut_site_diff(result)
 
