@@ -97,6 +97,7 @@ def find_bc_overlap(
     tm_range: tuple[float, float] = (48.0, 54.0),
     max_search: int = 120,
     max_start_shift: int = 40,
+    c_end: int | None = None,
 ) -> tuple[str, int, int, float, float]:
     """
     Find the overlap region shared by primers B and C.
@@ -115,6 +116,17 @@ def find_bc_overlap(
     G/C-end + Tm-range requirement together can be unsatisfiable from a
     single fixed start position.
 
+    c_end (optional): primer C's end position (from design_bc_primers'
+    independent walk). When given, every qualifying window is considered —
+    not just the first found — and the one minimizing the length difference
+    between primer B (search_from to the overlap's end) and primer C (the
+    overlap's start to c_end) is returned. A longer primer anneals less
+    specifically and has more chance of priming a wrong region of the
+    template, so this keeps B and C as evenly matched in length as possible
+    rather than defaulting to the shortest/leftmost valid overlap, which
+    tends to make B very short and C very long (or vice versa). When c_end
+    is omitted, the original first-match behavior is used unchanged.
+
     Returns (overlap_seq, start, end, tm_fwd, tm_rc).
     Raises RuntimeError if no qualifying window is found.
 
@@ -127,6 +139,9 @@ def find_bc_overlap(
     """
     seq = seq.upper()
     tm_lo, tm_hi = tm_range
+
+    best: tuple[str, int, int, float, float] | None = None
+    best_imbalance = None
 
     for start in range(search_from, search_from + max_start_shift + 1):
         if start >= len(seq) or seq[start] not in "GC":
@@ -142,8 +157,21 @@ def find_bc_overlap(
                 continue
             tm_fwd = simple_tm(window)
             tm_rc  = simple_tm(str(Seq(window).reverse_complement()))
-            if tm_lo <= tm_fwd <= tm_hi and tm_lo <= tm_rc <= tm_hi:
+            if not (tm_lo <= tm_fwd <= tm_hi and tm_lo <= tm_rc <= tm_hi):
+                continue
+            if c_end is None:
                 return window, start, end, tm_fwd, tm_rc
+            len_b = end - search_from
+            len_c = c_end - start
+            imbalance = abs(len_b - len_c)
+            if best_imbalance is None or imbalance < best_imbalance:
+                best = (window, start, end, tm_fwd, tm_rc)
+                best_imbalance = imbalance
+                if imbalance == 0:
+                    return best  # can't do better than exactly equal
+
+    if best is not None:
+        return best
 
     raise RuntimeError(
         f"No overlap window ≥{min_len}bp with Tm in {tm_range}, G/C at both "
@@ -231,6 +259,7 @@ def design_bc_primers(
         must_cover=last_mut,
         min_len=min_overlap,
         tm_range=tm_range,
+        c_end=c_end,
     )
 
     # c_end was walked independently, before the overlap was known — from
