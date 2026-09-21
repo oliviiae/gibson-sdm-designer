@@ -656,7 +656,7 @@ def design_mutation_primers(
         # is shared by both B and C), but a silent diagnostic mutation
         # elsewhere has no such guarantee unless explicitly constrained.
         try:
-            bc = design_bc_primers(working_seq, changed_pos, tm_range, min_overlap)
+            bc = design_bc_primers(working_seq, changed_pos, tm_range, min_overlap, original_seq=sequence)
         except RuntimeError as exc:
             raise _PipelineError(f"B/C primer design failed: {exc}") from exc
 
@@ -735,7 +735,7 @@ def design_mutation_primers(
                 # construct as it will actually be ordered, not the
                 # pre-silent-mutation preliminary design.
                 try:
-                    bc_final = design_bc_primers(candidate_seq, changed_pos, tm_range, min_overlap)
+                    bc_final = design_bc_primers(candidate_seq, changed_pos, tm_range, min_overlap, original_seq=sequence)
                 except RuntimeError:
                     bc_final = None
 

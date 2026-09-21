@@ -42,12 +42,27 @@ tm_b                Wallace Tm of primer B (orientation-invariant, so the
                     few bases later to satisfy the G/C-terminus + Tm-range
                     constraints together (primer B's start never moves).
 tm_c_full           Wallace Tm of full primer C  (overlap + downstream annealing)
-tm_c_anneal         Wallace Tm of primer C's unique downstream annealing region only
-                    [overlap_end, c_end) — the portion that does NOT appear in primer B
+tm_c_anneal         Wallace Tm of primer C's actual priming region: the clean,
+                    mismatch-free stretch AFTER the last actually-mutated
+                    nucleotide within primer C's span, through c_end. This is
+                    what determines whether primer C's 3' end (its own true
+                    3' terminus, since C reads in the same direction as the
+                    template) can stably anneal and extend — mismatches
+                    nearer primer C's 5' end are tolerated, but the clean 3'
+                    stretch is what actually primes. NOT simply "past the
+                    overlap": the overlap can extend past the last mutated
+                    base to satisfy its own Tm/G-C-terminus requirements, so
+                    the last mutated position and the overlap's end are
+                    usually different points.
 tm_b_full           Wallace Tm of full primer B  (upstream annealing + overlap)
-tm_b_anneal         Wallace Tm of primer B's unique upstream annealing region only
-                    [b_start, overlap_start) — the portion that does NOT appear in
-                    primer C (symmetric to tm_c_anneal, on B's side of the overlap)
+tm_b_anneal         Wallace Tm of primer B's actual priming region: the
+                    clean, mismatch-free stretch from b_start up to (not
+                    including) the first actually-mutated nucleotide within
+                    primer B's span. Symmetric to tm_c_anneal — primer B is
+                    the reverse complement of its template-strand span, so
+                    its own true 3' terminus corresponds to the template's
+                    b_start end, and this is the clean stretch leading up to
+                    that terminus.
 tm_overlap_fwd      Wallace Tm of overlap on forward strand
 tm_overlap_rc       Wallace Tm of overlap on reverse strand (always == fwd)
 """
@@ -185,6 +200,7 @@ def design_bc_primers(
     changed_positions: list[int],
     tm_range: tuple[float, float] = (48.0, 54.0),
     min_overlap: int = 16,
+    original_seq: str | None = None,
 ) -> PrimerBCResult:
     """
     Design primers B and C for Gibson.
@@ -193,9 +209,20 @@ def design_bc_primers(
     ----------
     mutated_seq       Full mutated DNA sequence (sense strand, 5'→3').
     changed_positions 0-based absolute positions of mutated nucleotides
-                      (from find_codon_and_mutate).
+                      (from find_codon_and_mutate) — used only to anchor the
+                      b_start/c_end walks (Step 1/2 below), which are
+                      protocol-mandated to start from the target mutation's
+                      own position regardless of any other edit nearby.
     tm_range          Target Tm window in °C (Wallace rule).
     min_overlap       Minimum overlap length in bp (default 16).
+    original_seq      The unmutated (wild-type) sequence, same length and
+                      coordinates as mutated_seq. When given, primer B/C's
+                      "anneal" Tm is computed from the ACTUAL mismatched
+                      positions (a direct diff against wild type, so it
+                      correctly accounts for a silent diagnostic mutation
+                      too, not just the target mutation in changed_positions)
+                      rather than from the overlap's boundary. When omitted,
+                      falls back to the overlap-boundary approximation.
 
     Design logic
     ------------
@@ -306,19 +333,47 @@ def design_bc_primers(
     primer_b     = str(Seq(primer_b_fwd).reverse_complement())  # antisense oligo
     primer_c     = mutated_seq[ov_start:c_end]           # sense oligo, unmodified
 
+    # Priming ("anneal") Tm: the clean, mismatch-free stretch nearest each
+    # primer's own true 3' terminus — for B that's the template-coordinate
+    # low end (b_start side, since B is reverse-complemented), for C the
+    # high end (c_end side). When original_seq is available, find the
+    # actual mismatched positions directly (covers the target mutation AND
+    # any silent diagnostic mutation baked into this same span); otherwise
+    # fall back to the overlap boundary as an approximation.
+    if original_seq is not None:
+        original_seq = original_seq.upper()
+        b_mismatches = [
+            i for i in range(b_start, ov_end)
+            if i < len(original_seq) and mutated_seq[i] != original_seq[i]
+        ]
+        # If there's no mismatch anywhere in B's span at all (e.g. the
+        # mutation and any silent mutation both happen to land entirely
+        # within C's side instead), the whole primer is a clean match —
+        # the "priming region" is then the full span, not an arbitrary
+        # partial exclusion.
+        b_anneal_end = min(b_mismatches) if b_mismatches else ov_end
+        c_mismatches = [
+            i for i in range(ov_start, c_end)
+            if i < len(original_seq) and mutated_seq[i] != original_seq[i]
+        ]
+        c_anneal_start = (max(c_mismatches) + 1) if c_mismatches else ov_start
+    else:
+        b_anneal_end = ov_start
+        c_anneal_start = ov_end
+
     return PrimerBCResult(
         b_start=b_start,
         b_end=ov_end,
         primer_b=primer_b,
         primer_b_fwd=primer_b_fwd,
         tm_b=simple_tm(primer_b_fwd),
-        tm_b_anneal=simple_tm(mutated_seq[b_start:ov_start]),  # upstream-only portion
+        tm_b_anneal=simple_tm(mutated_seq[b_start:b_anneal_end]),
 
         c_start=ov_start,
         c_end=c_end,
         primer_c=primer_c,
         tm_c_full=simple_tm(primer_c),
-        tm_c_anneal=simple_tm(mutated_seq[ov_end:c_end]),  # downstream-only portion
+        tm_c_anneal=simple_tm(mutated_seq[c_anneal_start:c_end]),
 
         overlap_start=ov_start,
         overlap_end=ov_end,
