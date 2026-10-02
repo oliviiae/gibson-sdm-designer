@@ -17,7 +17,8 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 
 from pipeline import (
-    design_mutation_primers, find_all_positions, parse_mutation_label, parse_mutation_labels,
+    design_mutation_primers, find_all_positions, list_diagnostic_choices,
+    parse_mutation_label, parse_mutation_labels,
 )
 from primer_ad import NEB_CATALOG
 from assembly import translate_orf
@@ -954,6 +955,7 @@ if mode == "Design a mutation":
             mutations = parse_mutation_labels(label)
         except ValueError as exc:
             st.error(str(exc))
+            st.session_state["dm_request"] = None
         else:
             with st.spinner("Designing primers…"):
                 result = design_mutation_primers(
@@ -967,7 +969,73 @@ if mode == "Design a mutation":
                     primer_A_seq=primer_a_input.strip() or None,
                     primer_D_seq=primer_d_input.strip() or None,
                 )
-            _render_result(result)
+            st.session_state["dm_request"] = {
+                "sequence": sequence, "mutations": mutations,
+                "orf_start": int(orf_start), "tm_range": (tm_min, tm_max),
+                "window_bp": (int(win_near), int(win_far)),
+                "primer_A_seq": primer_a_input.strip() or None,
+                "primer_D_seq": primer_d_input.strip() or None,
+            }
+            st.session_state["dm_result"] = result
+            st.session_state["dm_chosen_enzyme"] = None
+
+    req = st.session_state.get("dm_request")
+    if req is not None:
+        result = st.session_state["dm_result"]
+        _render_result(result)
+
+        # Alternate diagnostic-enzyme choices — single mutations only (the
+        # scan mirrors design_mutation_primers' own search, which only
+        # exhausts same-codon/nearby-silent options for a single mutation).
+        if len(req["mutations"]) == 1 and not result.errors:
+            orig_aa, position, new_aa = req["mutations"][0]
+            choices = list_diagnostic_choices(
+                req["sequence"], req["orf_start"], position, new_aa, max_aa_distance=2,
+            )
+            if choices:
+                st.markdown('<div class="section-label">Other diagnostic enzyme choices '
+                            '(within 2 AA of the mutation)</div>', unsafe_allow_html=True)
+                st.dataframe(
+                    {
+                        "Enzyme": [c["enzyme"] for c in choices],
+                        "Effect": [c["effect"] for c in choices],
+                        "Route": [
+                            "direct mutation codon" if c["source"] == "mutation"
+                            else f"silent aa{c['silent_aa_index']} "
+                                 f"{c['silent_original_codon']}→{c['silent_new_codon']}"
+                            for c in choices
+                        ],
+                        "AA distance": [c["aa_distance"] for c in choices],
+                        "nt changes": [c["changes"] for c in choices],
+                        "NEB catalog": [_neb_tag(c["enzyme"]) for c in choices],
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                enzyme_names = [c["enzyme"] for c in choices]
+                current = result.diagnostic.enzyme if result.diagnostic else None
+                default_idx = enzyme_names.index(current) if current in enzyme_names else 0
+                col_pick, col_btn = st.columns([3, 1])
+                picked_enzyme = col_pick.selectbox(
+                    "Use this enzyme as the diagnostic site instead",
+                    enzyme_names, index=default_idx, key="dm_enzyme_pick",
+                )
+                if col_btn.button("Redesign with this enzyme", key="dm_redesign_btn"):
+                    with st.spinner(f"Redesigning with {picked_enzyme}…"):
+                        alt_result = design_mutation_primers(
+                            sequence=req["sequence"],
+                            target_position=position,
+                            original_aa=orig_aa,
+                            new_aa=new_aa,
+                            orf_start=req["orf_start"],
+                            tm_range=req["tm_range"],
+                            window_bp=req["window_bp"],
+                            primer_A_seq=req["primer_A_seq"],
+                            primer_D_seq=req["primer_D_seq"],
+                            preferred_diagnostic_enzyme=picked_enzyme,
+                        )
+                    st.session_state["dm_result"] = alt_result
+                    st.rerun()
 
 else:
     col1, col2, col3 = st.columns([1, 1, 3])

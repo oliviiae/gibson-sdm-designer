@@ -349,6 +349,113 @@ def _silent_mutation_seq(
     return seq[:codon_abs] + new_codon.upper() + seq[codon_abs + 3:]
 
 
+def list_diagnostic_choices(
+    sequence: str,
+    orf_start: int,
+    target_position: int,
+    new_aa: str,
+    max_aa_distance: int = 2,
+) -> list[dict]:
+    """
+    Enumerate every globally-unique diagnostic restriction-site option
+    available for a single point mutation, instead of just the one
+    design_mutation_primers() would auto-pick. Covers:
+      - every synonymous codon at the mutation site itself (aa_distance 0)
+      - every 1-codon silent mutation within max_aa_distance amino acids of
+        the mutation (aa_distance 1..max_aa_distance)
+
+    Does not run primer design — this is a cheap pre-scan so a caller (e.g.
+    the UI) can show the available enzymes and let the user pick one before
+    paying for a full design. Pass the chosen enzyme's "enzyme" value as
+    preferred_diagnostic_enzyme to design_mutation_primers() to get the full
+    design built around that specific choice. A choice found here can still
+    fail to survive that full design in rare cases (e.g. a silent mutation
+    near the mutation codon shifts primer B/C's boundary enough that the
+    site falls outside either primer) — design_mutation_primers() reports
+    that as a warning rather than silently substituting another enzyme.
+
+    Returns a list of dicts, one per distinct enzyme (the best — closest,
+    fewest-change — route to each is kept if more than one route reaches the
+    same enzyme), sorted by (aa_distance, changes, enzyme):
+      enzyme, effect ('gained'/'lost'), source ('mutation'/'silent_mutation'),
+      changes (nt changes in the altered codon), aa_distance (0 for the
+      mutation site itself), new_codon (source == 'mutation' only),
+      silent_aa_index/silent_original_codon/silent_new_codon
+      (source == 'silent_mutation' only).
+    """
+    sequence = sequence.upper()
+    mutated_seq, _, orig_codon, default_codon = find_codon_and_mutate(
+        sequence, orf_start, target_position, new_aa
+    )
+    codon_abs = orf_start + (target_position - 1) * 3
+    before_sites = scan_sites(sequence)
+    after_sites = scan_sites(mutated_seq)
+
+    best: dict[str, dict] = {}
+
+    def _consider(candidate: dict) -> None:
+        existing = best.get(candidate["enzyme"])
+        key = (candidate["aa_distance"], candidate["changes"])
+        if existing is None or key < (existing["aa_distance"], existing["changes"]):
+            best[candidate["enzyme"]] = candidate
+
+    # Same-codon alternatives (aa_distance 0): every synonymous codon,
+    # ranked fewest-change first, checked against the WILD-TYPE sequence
+    # (mirroring design_mutation_primers' own direct-mutation search).
+    for alt_codon in [default_codon] + ranked_codon_options(orig_codon, new_aa):
+        alt_seq, _, _, _ = apply_codon(sequence, orf_start, target_position, alt_codon)
+        alt_diff = gained_lost_sites(sequence, alt_seq)
+        alt_after = scan_sites(alt_seq)
+        changes = sum(a != b for a, b in zip(orig_codon.upper(), alt_codon.upper()))
+        for enz in alt_diff["gained"]:
+            if (len(before_sites.get(enz, [])) == 0
+                    and len(alt_after.get(enz, [])) == len(alt_diff["gained"][enz])):
+                _consider({
+                    "source": "mutation", "enzyme": enz, "effect": "gained",
+                    "changes": changes, "aa_distance": 0, "new_codon": alt_codon,
+                    "silent_aa_index": None, "silent_original_codon": None,
+                    "silent_new_codon": None,
+                })
+        for enz in alt_diff["lost"]:
+            if (len(alt_after.get(enz, [])) == 0
+                    and len(before_sites.get(enz, [])) == len(alt_diff["lost"][enz])):
+                _consider({
+                    "source": "mutation", "enzyme": enz, "effect": "lost",
+                    "changes": changes, "aa_distance": 0, "new_codon": alt_codon,
+                    "silent_aa_index": None, "silent_original_codon": None,
+                    "silent_new_codon": None,
+                })
+
+    # Silent mutations within max_aa_distance AA of the mutation codon,
+    # checked against the sequence WITH the default-codon mutation already
+    # applied (mirroring design_mutation_primers' silent-mutation search).
+    window_start = orf_start + (target_position - 1 - max_aa_distance) * 3
+    window_end = orf_start + (target_position + max_aa_distance) * 3
+    for candidate in find_silent_restriction_sites(mutated_seq, orf_start, window_start, window_end):
+        if candidate["aa_index"] == target_position:
+            continue  # covered by the same-codon alternatives above
+        enz = candidate["enzyme"]
+        cand_seq = _silent_mutation_seq(mutated_seq, candidate["position"], candidate["new_codon"])
+        cand_count = len(count_sites(cand_seq, enz))
+        enz_before = len(after_sites.get(enz, []))
+        if candidate["effect"] == "gained":
+            clean = enz_before == 0 and cand_count == len(candidate["site_positions"])
+        else:
+            clean = cand_count == 0 and enz_before == len(candidate["site_positions"])
+        if clean:
+            _consider({
+                "source": "silent_mutation", "enzyme": enz, "effect": candidate["effect"],
+                "changes": candidate["changes"],
+                "aa_distance": abs(candidate["aa_index"] - target_position),
+                "new_codon": None,
+                "silent_aa_index": candidate["aa_index"],
+                "silent_original_codon": candidate["original_codon"],
+                "silent_new_codon": candidate["new_codon"],
+            })
+
+    return sorted(best.values(), key=lambda c: (c["aa_distance"], c["changes"], c["enzyme"]))
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -365,11 +472,12 @@ def design_mutation_primers(
     min_overlap: int = 16,
     target_tm: float = 51.0,
     preferred_enzymes: list[str] | None = None,
-    silent_window_flank: int = 9,
-    max_silent_search_flank: int = 150,
+    silent_window_flank: int = 6,
+    max_silent_search_flank: int = 6,
     max_ad_window_expansions: int = 3,
     primer_A_seq: str | None = None,
     primer_D_seq: str | None = None,
+    preferred_diagnostic_enzyme: str | None = None,
 ) -> PipelineResult:
     """
     Full Gibson primer design pipeline (Parts 1–6).
@@ -408,8 +516,13 @@ def design_mutation_primers(
                          when looking for a silent diagnostic restriction site.
                          If nothing is found, the window widens automatically
                          (×3 each retry) up to max_silent_search_flank.
+                         Within a window, candidates are tried closest codon
+                         first (then fewest nt changes), so the primer stays
+                         as short as possible.
     max_silent_search_flank: cap (nt) on how far the diagnostic-site search
-                         will widen before giving up.
+                         will widen before giving up. Default 6 nt = the
+                         lab's rule of silent mutations within 2 AA of the
+                         mutation; raise it to allow farther silent sites.
     max_ad_window_expansions: how many times to push the primer A/D search
                          window further out (default window_bp shifted +50%
                          of its span each time) if no unique flanking site
@@ -422,6 +535,14 @@ def design_mutation_primers(
                          restriction-site search for that side is skipped
                          entirely. Either or both may be supplied; any side
                          left as None is still auto-designed as usual.
+    preferred_diagnostic_enzyme: force the diagnostic-site search (both the
+                         same-codon alternatives and the silent-mutation
+                         search) to only consider this enzyme, instead of
+                         taking the first clean option found. Use
+                         list_diagnostic_choices() first to see which
+                         enzymes are actually available for a given
+                         mutation. If the named enzyme isn't reachable, no
+                         diagnostic is assigned (same as finding none).
 
     Returns
     -------
@@ -582,6 +703,11 @@ def design_mutation_primers(
             and len(before_sites.get(enz, [])) == len(lost[enz])
         ]
 
+        pref = preferred_diagnostic_enzyme
+        if pref is not None:
+            clean_gained = [e for e in clean_gained if e == pref]
+            clean_lost = [e for e in clean_lost if e == pref]
+
         if clean_gained:
             enz = clean_gained[0]
             diagnostic = DiagnosticInfo(
@@ -618,6 +744,9 @@ def design_mutation_primers(
                     if len(alt_after.get(enz, [])) == 0
                     and len(before_sites.get(enz, [])) == len(alt_diff["lost"][enz])
                 ]
+                if pref is not None:
+                    alt_clean_gained = [e for e in alt_clean_gained if e == pref]
+                    alt_clean_lost = [e for e in alt_clean_lost if e == pref]
                 if alt_clean_gained or alt_clean_lost:
                     mutated_seq, changed_pos, new_codon = alt_seq, alt_changed_pos, alt_codon
                     working_seq = mutated_seq
@@ -695,7 +824,7 @@ def design_mutation_primers(
                 else:  # "lost"
                     return cand_count == 0 and enz_before == len(candidate["site_positions"])
 
-            clean_hit = None
+            clean_hits: list = []
             best_unclean_hit = None  # best-effort fallback if nothing clean turns up
             while flank <= max_silent_search_flank:
                 near = max(bc.b_start, span_start - flank)
@@ -705,13 +834,21 @@ def design_mutation_primers(
                     find_silent_restriction_sites(mutated_seq, orf_start, near, far)
                     if near < far else []
                 )
+                # The mutation codon's own alternatives were already tried
+                # (against wild type) in the same-codon step above.
+                silent_hits = [h for h in silent_hits if h["aa_index"] not in positions]
+                if pref is not None:
+                    silent_hits = [h for h in silent_hits if h["enzyme"] == pref]
+                # Closest codon to the mutation first, then fewest nt
+                # changes — a farther silent change lengthens primer B/C.
+                silent_hits.sort(key=lambda h: (
+                    min(abs(h["aa_index"] - p) for p in positions),
+                    h["changes"], h["enzyme"],
+                ))
                 if silent_hits and best_unclean_hit is None:
                     best_unclean_hit = silent_hits[0]
-                for candidate in silent_hits:
-                    if _clean_candidate(candidate):
-                        clean_hit = candidate
-                        break
-                if clean_hit is not None:
+                clean_hits = [c for c in silent_hits if _clean_candidate(c)]
+                if clean_hits:
                     break
                 # Once the search window has been clamped all the way out to
                 # [b_start, c_end) on both sides, widening the flank further
@@ -723,10 +860,13 @@ def design_mutation_primers(
                 # starts at 0 (0 * 3 == 0 forever).
                 flank = min(max(flank, 1) * 3, max_silent_search_flank)
 
-            hit = clean_hit or best_unclean_hit
-            if hit is not None:
+            # Try candidates in preference order (closest first); the first
+            # one whose site still lands inside primer B/C after redesign wins.
+            candidates = clean_hits or ([best_unclean_hit] if best_unclean_hit else [])
+            hit = None
+            for cand in candidates:
                 candidate_seq = _silent_mutation_seq(
-                    mutated_seq, hit["position"], hit["new_codon"]
+                    mutated_seq, cand["position"], cand["new_codon"]
                 )
                 # Re-run B/C design on the sequence WITH the silent mutation
                 # applied — adding a base can shift local Tm enough to move
@@ -738,49 +878,59 @@ def design_mutation_primers(
                     bc_final = design_bc_primers(candidate_seq, changed_pos, tm_range, min_overlap, original_seq=sequence)
                 except RuntimeError:
                     bc_final = None
-
-                silent_codon_start = orf_start + (hit["aa_index"] - 1) * 3
+                silent_codon_start = orf_start + (cand["aa_index"] - 1) * 3
                 if bc_final is not None and bc_final.b_start <= silent_codon_start < bc_final.c_end:
-                    bc = bc_final
-                    working_seq = candidate_seq
-                    diagnostic = DiagnosticInfo(
-                        enzyme=hit["enzyme"],
-                        effect=hit["effect"],
-                        source="silent_mutation",
-                        silent_aa_index=hit["aa_index"],
-                        silent_original_codon=hit["original_codon"],
-                        silent_new_codon=hit["new_codon"],
-                        silent_changes=hit["changes"],
-                    )
-                    if searched_flank > silent_window_flank:
-                        result.warnings.append(
-                            f"Diagnostic site required widening the silent-mutation "
-                            f"search to ±{searched_flank} nt (default ±{silent_window_flank} nt) "
-                            f"to find {hit['enzyme']}."
-                        )
-                    if clean_hit is None:
-                        result.warnings.append(
-                            f"No diagnostic enzyme within ±{searched_flank} nt was confirmed "
-                            f"globally unique in the construct — {hit['enzyme']} was used as "
-                            f"the best available option, but it may cut elsewhere unrelated "
-                            f"to this mutation, making a simple digest unreliable as a "
-                            f"pass/fail screen. Consider verifying by sequencing instead, or "
-                            f"widen the search further."
-                        )
-                else:
-                    # Applying the silent mutation shifted B/C's boundaries
-                    # enough that the site is no longer actually inside
-                    # either primer — using it would report a diagnostic
-                    # that could never really appear in the PCR product.
-                    # Fall back to reporting no diagnostic rather than
-                    # shipping a design that can't be trusted.
+                    hit = cand
+                    break
+
+            if hit is not None:
+                bc = bc_final
+                working_seq = candidate_seq
+                diagnostic = DiagnosticInfo(
+                    enzyme=hit["enzyme"],
+                    effect=hit["effect"],
+                    source="silent_mutation",
+                    silent_aa_index=hit["aa_index"],
+                    silent_original_codon=hit["original_codon"],
+                    silent_new_codon=hit["new_codon"],
+                    silent_changes=hit["changes"],
+                )
+                if searched_flank > silent_window_flank:
                     result.warnings.append(
-                        f"A candidate diagnostic silent mutation ({hit['enzyme']}) was found, "
-                        f"but applying it moved primer B/C's boundaries so the site would no "
-                        f"longer actually be included in either primer's sequence — discarding "
-                        f"it rather than reporting an unreliable diagnostic. Restriction "
-                        f"verification will be skipped."
+                        f"Diagnostic site required widening the silent-mutation "
+                        f"search to ±{searched_flank} nt (default ±{silent_window_flank} nt) "
+                        f"to find {hit['enzyme']}."
                     )
+                if not clean_hits:
+                    result.warnings.append(
+                        f"No diagnostic enzyme within ±{searched_flank} nt was confirmed "
+                        f"globally unique in the construct — {hit['enzyme']} was used as "
+                        f"the best available option, but it may cut elsewhere unrelated "
+                        f"to this mutation, making a simple digest unreliable as a "
+                        f"pass/fail screen. Consider verifying by sequencing instead, or "
+                        f"widen the search further."
+                    )
+            elif candidates:
+                # Every candidate shifted B/C's boundaries enough that its
+                # site would no longer be inside either primer — using it
+                # would report a diagnostic that could never really appear in
+                # the PCR product. Report no diagnostic rather than shipping
+                # a design that can't be trusted.
+                names = ", ".join(dict.fromkeys(c["enzyme"] for c in candidates))
+                result.warnings.append(
+                    f"Candidate diagnostic silent mutation(s) ({names}) were found, "
+                    f"but applying each moved primer B/C's boundaries so the site would no "
+                    f"longer actually be included in either primer's sequence — discarding "
+                    f"them rather than reporting an unreliable diagnostic. Restriction "
+                    f"verification will be skipped."
+                )
+            elif pref is not None:
+                result.warnings.append(
+                    f"Preferred enzyme {pref} could not be used as the diagnostic site "
+                    f"for this mutation (not reachable within ±{searched_flank} nt via "
+                    f"the mutation codon or a nearby silent mutation, inside primer B/C's "
+                    f"own span). Restriction verification will be skipped."
+                )
             else:
                 result.warnings.append(
                     f"No diagnostic restriction site found within ±{searched_flank} nt "
