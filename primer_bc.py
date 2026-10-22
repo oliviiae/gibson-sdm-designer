@@ -101,6 +101,14 @@ class PrimerBCResult:
     tm_overlap_fwd: float
     tm_overlap_rc: float
 
+    # False when no overlap window could both start at or before and end
+    # past the mutation, so the overlap sits entirely downstream of it and
+    # only primer B carries the mutation. The design still produces the
+    # right construct (fragment "ab" supplies the mutated base), but it
+    # departs from the usual layout and leaves primer C a plain wild-type
+    # primer, so the pipeline warns.
+    mutation_in_overlap: bool = True
+
 
 # ---------------------------------------------------------------------------
 
@@ -108,6 +116,7 @@ def find_bc_overlap(
     seq: str,
     search_from: int,
     must_cover: int | None = None,
+    must_cover_from: int | None = None,
     min_len: int = 16,
     tm_range: tuple[float, float] = (48.0, 54.0),
     max_search: int = 120,
@@ -119,8 +128,11 @@ def find_bc_overlap(
 
     Per protocol: the overlap must (a) start AND end on a G/C base,
     (b) have Tm in tm_range on both strands, (c) be ≥ min_len, and
-    (d) cover the mutated base(s) (must_cover = the last mutated position,
-    0-based — the window's end must extend past it).
+    (d) cover the mutated base(s): the window must END past must_cover (the
+    last mutated position, 0-based) AND START at or before must_cover_from
+    (the first mutated position). Both halves matter — the overlap is the
+    region primers B and C share, so a window that ends past the mutation
+    but starts after it leaves the mutation out of primer C entirely.
 
     The overlap's start does not have to be exactly search_from (= primer
     B's start) — only its *end* has to match primer B's end. So this tries
@@ -161,6 +173,8 @@ def find_bc_overlap(
     for start in range(search_from, search_from + max_start_shift + 1):
         if start >= len(seq) or seq[start] not in "GC":
             continue
+        if must_cover_from is not None and start > must_cover_from:
+            break   # sliding further right can only drop the mutation too
         for length in range(min_len, min_len + max_search):
             end = start + length
             if end > len(seq):
@@ -190,8 +204,8 @@ def find_bc_overlap(
 
     raise RuntimeError(
         f"No overlap window ≥{min_len}bp with Tm in {tm_range}, G/C at both "
-        f"ends, and covering position {must_cover} found starting near "
-        f"position {search_from}."
+        f"ends, and covering positions {must_cover_from}-{must_cover} found "
+        f"starting near position {search_from}."
     )
 
 
@@ -295,14 +309,22 @@ def design_bc_primers(
     # cover the mutation (through last_mut), and have Tm in range on both
     # strands. Its start need not be exactly b_start — only its end has to
     # coincide with primer B's end.
-    overlap_seq, ov_start, ov_end, tm_ov_fwd, tm_ov_rc = find_bc_overlap(
-        mutated_seq,
-        search_from=b_start,
-        must_cover=last_mut,
-        min_len=min_overlap,
-        tm_range=tm_range,
-        c_end=c_end,
-    )
+    kw = dict(search_from=b_start, must_cover=last_mut, min_len=min_overlap,
+              tm_range=tm_range, c_end=c_end)
+    mutation_in_overlap = True
+    try:
+        overlap_seq, ov_start, ov_end, tm_ov_fwd, tm_ov_rc = find_bc_overlap(
+            mutated_seq, must_cover_from=first_mut, **kw
+        )
+    except RuntimeError:
+        # No window satisfies G/C ends + Tm range while also starting at or
+        # before the mutation. Rather than fail outright, fall back to a
+        # window that only ends past it — still a workable design, flagged
+        # so the caller can warn.
+        overlap_seq, ov_start, ov_end, tm_ov_fwd, tm_ov_rc = find_bc_overlap(
+            mutated_seq, **kw
+        )
+        mutation_in_overlap = False
 
     # c_end was walked independently, before the overlap was known — from
     # c_anchor (right after the last mutated base), not from wherever the
@@ -395,4 +417,5 @@ def design_bc_primers(
         overlap_seq=overlap_seq,
         tm_overlap_fwd=tm_ov_fwd,
         tm_overlap_rc=tm_ov_rc,
+        mutation_in_overlap=mutation_in_overlap,
     )

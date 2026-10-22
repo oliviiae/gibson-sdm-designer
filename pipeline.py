@@ -1014,6 +1014,24 @@ def design_mutation_primers(
                 f"Primer C's unique annealing Tm ({bc.tm_c_anneal:.0f}°C) is "
                 f"below the target {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
             )
+        # Above-range is just as much a miss as below: an over-long priming
+        # region costs more to order and can bind unintended sites.
+        for name, tm in (("B", bc.tm_b_anneal), ("C", bc.tm_c_anneal)):
+            if tm > tm_range[1]:
+                result.warnings.append(
+                    f"Primer {name}'s unique annealing Tm ({tm:.0f}°C) is above "
+                    f"the target {tm_range[0]:.0f}-{tm_range[1]:.0f}°C range."
+                )
+        if not bc.mutation_in_overlap:
+            result.warnings.append(
+                "No B/C overlap window could both start before and end after the "
+                "mutation (G/C ends plus the Tm range could not be met), so the "
+                "overlap sits downstream of it: only primer B carries the "
+                "mutation and primer C is a plain wild-type primer. The assembled "
+                "construct is still correct — fragment \"ab\" supplies the mutated "
+                "base — but primer C is longer than usual and gives no mutation-"
+                "specific priming."
+            )
 
         # ── Part 5: A/D primers ───────────────────────────────────────────────
         # If the user supplied their own primer A and/or D sequence, that side

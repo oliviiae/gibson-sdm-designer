@@ -63,13 +63,30 @@ def walk_to_tm(
         """The terminal base in the extension direction."""
         return seq[right - 1] if direction == 1 else seq[left]
 
+    # Fallbacks for when no length satisfies BOTH the Tm window and a G/C
+    # terminus. Without these the walk just kept extending to max_len,
+    # producing absurd primers (e.g. a 43-mer at 170°C) that are expensive
+    # to order and prone to priming the wrong place — far worse than
+    # accepting an A/T terminus or a Tm a couple of degrees out.
+    best_in_window: tuple[int, int] | None = None   # shortest with Tm in range
+    best_gc: tuple[float, int, int] | None = None   # G/C end, Tm nearest range
+    ideal = False
+
     for _ in range(max_len):
         tm = simple_tm(current_primer())
         in_window = tm_lo <= tm <= tm_hi
         gc_ok = end_base() in "GC"
 
         if in_window and (not must_end_gc or gc_ok):
+            ideal = True
             break
+
+        if in_window and best_in_window is None:
+            best_in_window = (left, right)
+        if gc_ok:
+            dist = 0.0 if in_window else (tm_lo - tm if tm < tm_lo else tm - tm_hi)
+            if best_gc is None or dist < best_gc[0]:
+                best_gc = (dist, left, right)
 
         # Decide which side to extend
         if direction == 1:
@@ -80,9 +97,16 @@ def walk_to_tm(
             if left <= 0:
                 break
             left -= 1
-    else:
-        # hit max_len — return what we have
-        pass
+
+    if not ideal:
+        # Staying inside the Tm window wins over the G/C terminus: a primer
+        # below the window may simply not anneal, which is the failure that
+        # matters most. Only when no length lands in the window at all do we
+        # fall back to the G/C end whose Tm comes closest to it.
+        if best_in_window is not None:
+            left, right = best_in_window
+        elif best_gc is not None:
+            _, left, right = best_gc
 
     primer = seq[left:right]
     return primer, left, right, simple_tm(primer)

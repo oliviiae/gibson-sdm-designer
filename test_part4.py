@@ -212,8 +212,56 @@ def test_design_bc_primers_overlap_covers_mutation():
     result = design_bc_primers(mutated_seq, changed_pos)
     assert result.overlap_end > changed_pos[-1], \
         f"Overlap end {result.overlap_end} does not cover mutation at {changed_pos}"
+    assert result.overlap_start <= changed_pos[0], \
+        f"Overlap start {result.overlap_start} begins after mutation at {changed_pos}"
     print(f"  aa47 K→E: overlap [{result.overlap_start},{result.overlap_end}) "
           f"covers mutation at {changed_pos}  PASS")
+
+
+def test_overlap_covers_mutation_every_position():
+    """
+    Regression: the overlap is the region primers B and C SHARE, so it must
+    both end past the mutation and start at or before it. Requiring only
+    the end let the overlap slide past the mutation entirely, leaving it
+    out of primer C — whose reported priming Tm then became the whole
+    primer (100°C+), far outside the 48-54°C range.
+    """
+    print("\n[Part 4] Overlap covers mutation at EVERY position")
+    n_aa = len(_ORF_CODONS) - 1
+    checked = 0
+    fellback = []
+    for pos in range(2, n_aa):
+        aa = str(Seq(_ORF_CODONS[pos - 1]).translate())
+        new_aa = "A" if aa != "A" else "G"
+        try:
+            mutated_seq, changed_pos, _, _ = find_codon_and_mutate(
+                TEST_SEQ, _ORF_START, aa_position=pos, new_aa=new_aa
+            )
+            r = design_bc_primers(mutated_seq, changed_pos, original_seq=TEST_SEQ)
+        except (ValueError, RuntimeError):
+            continue
+        checked += 1
+        covered = r.overlap_start <= changed_pos[0] and r.overlap_end > changed_pos[-1]
+        # Not covering is allowed ONLY as the documented fallback, and must
+        # be reported as such rather than passing silently.
+        assert covered == r.mutation_in_overlap, (
+            f"aa{pos}: overlap [{r.overlap_start},{r.overlap_end}) vs mutation "
+            f"{changed_pos}, but mutation_in_overlap={r.mutation_in_overlap}"
+        )
+        if covered:
+            # Both primers must actually carry every mutated base.
+            for i in changed_pos:
+                assert r.b_start <= i < r.b_end, f"aa{pos}: primer B misses {i}"
+                assert r.c_start <= i < r.c_end, f"aa{pos}: primer C misses {i}"
+        else:
+            fellback.append(pos)
+            # The fallback still has to put the mutation inside primer B,
+            # otherwise the assembled construct would not carry it at all.
+            for i in changed_pos:
+                assert r.b_start <= i < r.b_end, f"aa{pos}: primer B misses {i}"
+    assert checked > 20, f"only {checked} positions exercised"
+    print(f"  {checked} positions: {checked - len(fellback)} cover the mutation "
+          f"(B and C both carry it), {len(fellback)} flagged fallback  PASS")
 
 
 # ---------------------------------------------------------------------------
@@ -223,4 +271,5 @@ if __name__ == "__main__":
     test_find_bc_overlap_tm_rc_symmetry()
     test_design_bc_primers_k15e()
     test_design_bc_primers_overlap_covers_mutation()
+    test_overlap_covers_mutation_every_position()
     print("\nAll Part 4 tests passed.")

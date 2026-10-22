@@ -728,6 +728,14 @@ def _render_result(result, key_prefix=""):
             st.error(e)
         return
 
+    # Warnings were previously computed but never displayed, so a design
+    # that silently missed the Tm range or fell back on a non-standard
+    # overlap looked identical to a clean one. Primer warnings come first
+    # — they change what you would order.
+    if result.warnings:
+        for w in sorted(result.warnings, key=lambda w: "Primer " not in w):
+            st.warning(w)
+
     kv = [
         ("Mutation", result.mutation_label),
         ("Codon change", f"<code>{result.original_codon}</code> → <code>{result.new_codon}</code>"),
@@ -931,6 +939,9 @@ def _render_result(result, key_prefix=""):
         + f"\n\nOverlap: {result.overlap_seq}\n"
         f"Overall: {'PASS' if result.overall_passed else 'FAIL'}\n"
     )
+    if result.warnings:
+        report_text += ("\nWarnings:\n"
+                        + "\n".join(f"  - {w}" for w in result.warnings) + "\n")
     if result.frag_ad_bp:
         report_text += (
             f"\nFragment ab ({result.frag_ab_bp} bp): {result.frag_ab_seq}\n"
