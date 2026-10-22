@@ -12,6 +12,8 @@ find_silent_restriction_sites(seq, orf_start, window_start, window_end, new_aa=N
      sorted by number of nucleotide changes (ascending)
 """
 
+import re
+
 from Bio.Restriction import RestrictionBatch, Analysis, CommOnly
 from Bio.Seq import Seq
 
@@ -280,3 +282,41 @@ def find_silent_restriction_sites(
 
     results.sort(key=lambda r: (r["changes"], r["enzyme"]))
     return results
+
+
+_METHYL_MOTIFS = {
+    "Dam (GATC)": re.compile(r"(?=GATC)"),
+    "Dcm (CCWGG)": re.compile(r"(?=CC[AT]GG)"),
+}
+_METHYL_MOTIF_LEN = {"Dam (GATC)": 4, "Dcm (CCWGG)": 5}
+
+
+def methylation_overlaps(seq: str, enzyme_name: str, near_start: int, near_end: int) -> list[str]:
+    """
+    Which E. coli methylation motifs (Dam GATC, Dcm CCWGG) overlap this
+    enzyme's recognition site(s) lying within [near_start, near_end) of seq.
+
+    This only reports the sequence context; whether an overlap actually
+    blocks cutting depends on the enzyme's own Dam/Dcm sensitivity (see
+    NEB's methylation sensitivity table). An empty list means no overlap,
+    so methylation cannot interfere at this site.
+    """
+    enz = _ENZYME_BY_NAME.get(enzyme_name)
+    if enz is None:
+        return []
+    seq = seq.upper()
+    sites = [
+        (m.start(), m.start() + enz.size)
+        for m in enz.compsite.finditer(seq)
+        if m.start() < near_end and m.start() + enz.size > near_start
+    ]
+    hits = []
+    for label, motif in _METHYL_MOTIFS.items():
+        mlen = _METHYL_MOTIF_LEN[label]
+        lo = max(0, min((s for s, _ in sites), default=0) - mlen)
+        hi = max((e for _, e in sites), default=0) + mlen
+        for m in motif.finditer(seq, lo, hi):
+            if any(m.start() < e and m.start() + mlen > s for s, e in sites):
+                hits.append(label)
+                break
+    return hits

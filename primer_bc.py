@@ -249,11 +249,26 @@ def design_bc_primers(
     first_mut = min(changed_positions)
     last_mut  = max(changed_positions)
 
+    # The B/C walks must start past EVERY changed base — including a silent
+    # diagnostic mutation, which isn't in changed_positions — or the clean
+    # priming stretch after it can fall short of tm_range (e.g. primer C
+    # walked to 50°C from the target mutation, but only 36°C of it lies
+    # past a silent change a few bases further on).
+    walk_first, walk_last = first_mut, last_mut
+    if original_seq is not None:
+        diffs = [
+            i for i, (m, o) in enumerate(zip(mutated_seq, original_seq.upper()))
+            if m != o
+        ]
+        if diffs:
+            walk_first = min(walk_first, diffs[0])
+            walk_last = max(walk_last, diffs[-1])
+
     # --- Step 1: B start (walk 5') -------------------------------------------
     # Protocol: "starting right before the first change... upstream" — the
     # walk's anchor is the base immediately 5' of the first mutated
     # nucleotide, not the mutated base itself.
-    b_anchor = max(0, first_mut - 1)
+    b_anchor = max(0, walk_first - 1)
     _, b_start, _, _ = walk_to_tm(
         mutated_seq,
         anchor_pos=b_anchor,
@@ -266,7 +281,7 @@ def design_bc_primers(
     # Protocol: "starting right after the last change... downstream" — the
     # walk's anchor is the base immediately 3' of the last mutated
     # nucleotide, not the mutated base itself.
-    c_anchor = min(len(mutated_seq) - 1, last_mut + 1)
+    c_anchor = min(len(mutated_seq) - 1, walk_last + 1)
     _, _, c_end, _ = walk_to_tm(
         mutated_seq,
         anchor_pos=c_anchor,
@@ -306,7 +321,7 @@ def design_bc_primers(
     if ov_end >= c_end:
         _, _, c_end, _ = walk_to_tm(
             mutated_seq,
-            anchor_pos=min(len(mutated_seq) - 1, ov_end),
+            anchor_pos=min(len(mutated_seq) - 1, max(ov_end, walk_last + 1)),
             direction=1,
             tm_range=tm_range,
             must_end_gc=True,

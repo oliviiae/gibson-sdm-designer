@@ -24,7 +24,10 @@ from codon_utils import find_codon_and_mutate, ranked_codon_options, apply_codon
 from primer_bc import design_bc_primers, PrimerBCResult
 from primer_ad import design_ad_primers, FlankingPrimerResult, CandidateSite, PREFERRED_ENZYMES
 from tm_utils import simple_tm
-from restriction_utils import gained_lost_sites, find_silent_restriction_sites, scan_sites, count_sites, predict_gel_bands
+from restriction_utils import (
+    gained_lost_sites, find_silent_restriction_sites, scan_sites, count_sites,
+    predict_gel_bands, methylation_overlaps,
+)
 from assembly import (
     assemble_product,
     translate_orf,
@@ -355,6 +358,8 @@ def list_diagnostic_choices(
     target_position: int,
     new_aa: str,
     max_aa_distance: int = 2,
+    tm_range: tuple[float, float] = (48.0, 54.0),
+    min_overlap: int = 16,
 ) -> list[dict]:
     """
     Enumerate every globally-unique diagnostic restriction-site option
@@ -381,7 +386,10 @@ def list_diagnostic_choices(
       changes (nt changes in the altered codon), aa_distance (0 for the
       mutation site itself), new_codon (source == 'mutation' only),
       silent_aa_index/silent_original_codon/silent_new_codon
-      (source == 'silent_mutation' only).
+      (source == 'silent_mutation' only), methylation (list of Dam/Dcm
+      motifs overlapping the site — see methylation_overlaps).
+    Silent options whose site would fall outside primer B/C once the
+    primers are redesigned around it are left out.
     """
     sequence = sequence.upper()
     mutated_seq, _, orig_codon, default_codon = find_codon_and_mutate(
@@ -392,6 +400,11 @@ def list_diagnostic_choices(
     after_sites = scan_sites(mutated_seq)
 
     best: dict[str, dict] = {}
+
+    def _methyl(route_seq: str, effect: str, enz: str, codon_start: int) -> list[str]:
+        # A gained site exists only in the mutant; a lost one only in wild type.
+        site_seq = route_seq if effect == "gained" else sequence
+        return methylation_overlaps(site_seq, enz, codon_start - 30, codon_start + 33)
 
     def _consider(candidate: dict) -> None:
         existing = best.get(candidate["enzyme"])
@@ -415,6 +428,7 @@ def list_diagnostic_choices(
                     "changes": changes, "aa_distance": 0, "new_codon": alt_codon,
                     "silent_aa_index": None, "silent_original_codon": None,
                     "silent_new_codon": None,
+                    "methylation": _methyl(alt_seq, "gained", enz, codon_abs),
                 })
         for enz in alt_diff["lost"]:
             if (len(alt_after.get(enz, [])) == 0
@@ -424,6 +438,7 @@ def list_diagnostic_choices(
                     "changes": changes, "aa_distance": 0, "new_codon": alt_codon,
                     "silent_aa_index": None, "silent_original_codon": None,
                     "silent_new_codon": None,
+                    "methylation": _methyl(alt_seq, "lost", enz, codon_abs),
                 })
 
     # Silent mutations within max_aa_distance AA of the mutation codon,
@@ -443,6 +458,15 @@ def list_diagnostic_choices(
         else:
             clean = cand_count == 0 and enz_before == len(candidate["site_positions"])
         if clean:
+            # Same check as design_mutation_primers: the silent change only
+            # counts if it lands inside primer B/C's own synthesized span.
+            mut_changed = [i for i in range(codon_abs, codon_abs + 3) if mutated_seq[i] != sequence[i]]
+            try:
+                bc = design_bc_primers(cand_seq, mut_changed, tm_range, min_overlap, original_seq=sequence)
+            except RuntimeError:
+                continue
+            if not (bc.b_start <= candidate["position"] < bc.c_end):
+                continue
             _consider({
                 "source": "silent_mutation", "enzyme": enz, "effect": candidate["effect"],
                 "changes": candidate["changes"],
@@ -451,6 +475,7 @@ def list_diagnostic_choices(
                 "silent_aa_index": candidate["aa_index"],
                 "silent_original_codon": candidate["original_codon"],
                 "silent_new_codon": candidate["new_codon"],
+                "methylation": _methyl(cand_seq, candidate["effect"], enz, candidate["position"]),
             })
 
     return sorted(best.values(), key=lambda c: (c["aa_distance"], c["changes"], c["enzyme"]))

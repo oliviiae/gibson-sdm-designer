@@ -23,7 +23,7 @@ from pipeline import (
 from primer_ad import NEB_CATALOG
 from assembly import translate_orf
 from xdna_utils import read_xdna_sequence
-from restriction_utils import scan_sites
+from restriction_utils import methylation_overlaps, scan_sites
 
 st.set_page_config(page_title="Gibson Primer Designer", layout="wide")
 
@@ -203,6 +203,11 @@ def _find_orf_candidates(sequence: str, top_n: int = 8, min_aa: int = 20):
             pos = atg + 1
         orfs.sort(key=lambda t: -t[1])
     return orfs[:top_n]
+
+
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 def _neb_tag(enzyme: str | None) -> str:
@@ -977,52 +982,108 @@ if mode == "Design a mutation":
                 "primer_D_seq": primer_d_input.strip() or None,
             }
             st.session_state["dm_result"] = result
-            st.session_state["dm_chosen_enzyme"] = None
+            st.session_state["dm_choices"] = None
 
     req = st.session_state.get("dm_request")
     if req is not None:
-        result = st.session_state["dm_result"]
-        _render_result(result)
+        auto_result = st.session_state["dm_result"]
+        choices = st.session_state.get("dm_choices")
+        if choices is None:
+            choices = []
+            # Single mutations only: the alternate-enzyme search mirrors
+            # design_mutation_primers' own same-codon/nearby-silent search.
+            if len(req["mutations"]) == 1 and not auto_result.errors:
+                _, position, new_aa = req["mutations"][0]
+                with st.spinner("Looking for other diagnostic enzymes…"):
+                    choices = list_diagnostic_choices(
+                        req["sequence"], req["orf_start"], position, new_aa,
+                        max_aa_distance=2, tm_range=req["tm_range"],
+                    )
+                # The automatic design's enzyme is always the 1st choice.
+                auto_enz = auto_result.diagnostic.enzyme if auto_result.diagnostic else None
+                first = [c for c in choices if c["enzyme"] == auto_enz]
+                if not first and auto_enz is not None:
+                    # e.g. the fallback enzyme that also cuts elsewhere —
+                    # not a clean choice, but it's what the design shows.
+                    d = auto_result.diagnostic
+                    silent = d.source == "silent_mutation"
+                    first = [{
+                        "enzyme": auto_enz, "effect": d.effect, "source": d.source,
+                        "new_codon": auto_result.new_codon,
+                        "silent_aa_index": d.silent_aa_index,
+                        "silent_original_codon": d.silent_original_codon,
+                        "silent_new_codon": d.silent_new_codon,
+                        "aa_distance": abs(d.silent_aa_index - position) if silent else 0,
+                        "changes": d.silent_changes if silent else sum(
+                            a != b for a, b in zip(auto_result.original_codon, auto_result.new_codon)),
+                        "methylation": methylation_overlaps(
+                            auto_result.mutated_sequence if d.effect == "gained" else req["sequence"],
+                            auto_enz, auto_result.mutation_nt_position - 40,
+                            auto_result.mutation_nt_position + 40),
+                    }]
+                choices = first + [c for c in choices if c["enzyme"] != auto_enz]
+            st.session_state["dm_choices"] = choices
+            st.session_state["dm_idx"] = 0
+            st.session_state["dm_cache"] = {}
 
-        # Alternate diagnostic-enzyme choices — single mutations only (the
-        # scan mirrors design_mutation_primers' own search, which only
-        # exhausts same-codon/nearby-silent options for a single mutation).
-        if len(req["mutations"]) == 1 and not result.errors:
-            orig_aa, position, new_aa = req["mutations"][0]
-            choices = list_diagnostic_choices(
-                req["sequence"], req["orf_start"], position, new_aa, max_aa_distance=2,
+        result = auto_result
+        if len(choices) > 1:
+            idx = st.session_state.get("dm_idx", 0)
+            st.markdown('<div class="section-label">Diagnostic enzyme choices '
+                        '(within 2 AA of the mutation)</div>', unsafe_allow_html=True)
+            st.caption(
+                "Ranked closest to the mutation first, then fewest nucleotide changes. "
+                "Use Next choice to see the full primer design for a different enzyme — "
+                "e.g. one you already have, or one not affected by methylation."
             )
-            if choices:
-                st.markdown('<div class="section-label">Other diagnostic enzyme choices '
-                            '(within 2 AA of the mutation)</div>', unsafe_allow_html=True)
-                st.dataframe(
-                    {
-                        "Enzyme": [c["enzyme"] for c in choices],
-                        "Effect": [c["effect"] for c in choices],
-                        "Route": [
-                            "direct mutation codon" if c["source"] == "mutation"
-                            else f"silent aa{c['silent_aa_index']} "
-                                 f"{c['silent_original_codon']}→{c['silent_new_codon']}"
-                            for c in choices
-                        ],
-                        "AA distance": [c["aa_distance"] for c in choices],
-                        "nt changes": [c["changes"] for c in choices],
-                        "NEB catalog": [_neb_tag(c["enzyme"]) for c in choices],
-                    },
-                    hide_index=True,
-                    use_container_width=True,
+            st.dataframe(
+                {
+                    "Choice": [_ordinal(i + 1) + (" (showing)" if i == idx else "")
+                               for i in range(len(choices))],
+                    "Enzyme": [c["enzyme"] for c in choices],
+                    "Effect": [c["effect"] for c in choices],
+                    "Route": [
+                        "mutation codon " + c["new_codon"] if c["source"] == "mutation"
+                        else f"silent aa{c['silent_aa_index']} "
+                             f"{c['silent_original_codon']}→{c['silent_new_codon']}"
+                        for c in choices
+                    ],
+                    "AA from mutation": [c["aa_distance"] for c in choices],
+                    "nt changes": [c["changes"] for c in choices],
+                    "Dam/Dcm overlap": [", ".join(c["methylation"]) or "—" for c in choices],
+                    "NEB catalog": [_neb_tag(c["enzyme"]) for c in choices],
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
+            if any(c["methylation"] for c in choices):
+                st.caption(
+                    "Dam/Dcm overlap = the recognition site overlaps a GATC (Dam) or "
+                    "CCWGG (Dcm) methylation motif. This only blocks cutting if the "
+                    "enzyme is sensitive to that methylation (check NEB's methylation "
+                    "sensitivity chart), or grow the plasmid in a dam⁻/dcm⁻ strain."
                 )
-                enzyme_names = [c["enzyme"] for c in choices]
-                current = result.diagnostic.enzyme if result.diagnostic else None
-                default_idx = enzyme_names.index(current) if current in enzyme_names else 0
-                col_pick, col_btn = st.columns([3, 1])
-                picked_enzyme = col_pick.selectbox(
-                    "Use this enzyme as the diagnostic site instead",
-                    enzyme_names, index=default_idx, key="dm_enzyme_pick",
-                )
-                if col_btn.button("Redesign with this enzyme", key="dm_redesign_btn"):
-                    with st.spinner(f"Redesigning with {picked_enzyme}…"):
-                        alt_result = design_mutation_primers(
+            col_prev, col_next, col_pick = st.columns([1, 1, 3])
+            if col_prev.button("◀ Previous", disabled=idx == 0, key="dm_prev"):
+                st.session_state["dm_idx"] = idx - 1
+                st.rerun()
+            if col_next.button("Next choice ▶", disabled=idx >= len(choices) - 1, key="dm_next"):
+                st.session_state["dm_idx"] = idx + 1
+                st.rerun()
+            labels = [f"{_ordinal(i + 1)} — {c['enzyme']}" for i, c in enumerate(choices)]
+            picked = col_pick.selectbox("Jump to choice", labels, index=idx,
+                                        label_visibility="collapsed")
+            if labels.index(picked) != idx:
+                st.session_state["dm_idx"] = labels.index(picked)
+                st.rerun()
+
+            if idx > 0:
+                enz = choices[idx]["enzyme"]
+                cache = st.session_state["dm_cache"]
+                if enz not in cache:
+                    orig_aa, position, new_aa = req["mutations"][0]
+                    with st.spinner(f"Designing primers with {enz}…"):
+                        cache[enz] = design_mutation_primers(
                             sequence=req["sequence"],
                             target_position=position,
                             original_aa=orig_aa,
@@ -1032,10 +1093,12 @@ if mode == "Design a mutation":
                             window_bp=req["window_bp"],
                             primer_A_seq=req["primer_A_seq"],
                             primer_D_seq=req["primer_D_seq"],
-                            preferred_diagnostic_enzyme=picked_enzyme,
+                            preferred_diagnostic_enzyme=enz,
                         )
-                    st.session_state["dm_result"] = alt_result
-                    st.rerun()
+                result = cache[enz]
+            st.markdown(f"**Showing {_ordinal(idx + 1)} choice: {choices[idx]['enzyme']}**")
+
+        _render_result(result)
 
 else:
     col1, col2, col3 = st.columns([1, 1, 3])
