@@ -26,7 +26,7 @@ from primer_ad import design_ad_primers, FlankingPrimerResult, CandidateSite, PR
 from tm_utils import simple_tm
 from restriction_utils import (
     gained_lost_sites, find_silent_restriction_sites, scan_sites, count_sites,
-    predict_gel_bands, methylation_overlaps,
+    predict_gel_bands, methylation_overlaps, gel_pattern_change,
 )
 from assembly import (
     assemble_product,
@@ -62,6 +62,12 @@ class DiagnosticInfo:
     silent_original_codon: str | None = None
     silent_new_codon: str | None = None
     silent_changes: int | None = None
+    # A unique site (the enzyme cuts nowhere else) gives a simple cut/no-cut
+    # readout. False means the enzyme already cuts the construct elsewhere
+    # and the diagnostic is read from the BAND PATTERN instead — still
+    # perfectly usable, and preferred when it costs fewer nucleotide changes.
+    site_unique: bool = True
+    wt_site_count: int = 0
 
 
 @dataclass
@@ -420,25 +426,29 @@ def list_diagnostic_choices(
         alt_diff = gained_lost_sites(sequence, alt_seq)
         alt_after = scan_sites(alt_seq)
         changes = sum(a != b for a, b in zip(orig_codon.upper(), alt_codon.upper()))
-        for enz in alt_diff["gained"]:
-            if (len(before_sites.get(enz, [])) == 0
-                    and len(alt_after.get(enz, [])) == len(alt_diff["gained"][enz])):
+        for effect in ("gained", "lost"):
+            for enz in alt_diff[effect]:
+                if effect == "gained":
+                    unique = (len(before_sites.get(enz, [])) == 0
+                              and len(alt_after.get(enz, [])) == len(alt_diff[effect][enz]))
+                else:
+                    unique = (len(alt_after.get(enz, [])) == 0
+                              and len(before_sites.get(enz, [])) == len(alt_diff[effect][enz]))
+                # An enzyme that cuts elsewhere is still offered when its
+                # band pattern reads cleanly — often the cheapest option,
+                # since it needs no extra nucleotide change.
+                if not unique and not gel_pattern_change(sequence, alt_seq, enz)["readable"]:
+                    continue
                 _consider({
-                    "source": "mutation", "enzyme": enz, "effect": "gained",
+                    "source": "mutation", "enzyme": enz, "effect": effect,
                     "changes": changes, "aa_distance": 0, "new_codon": alt_codon,
                     "silent_aa_index": None, "silent_original_codon": None,
                     "silent_new_codon": None,
-                    "methylation": _methyl(alt_seq, "gained", enz, codon_abs),
-                })
-        for enz in alt_diff["lost"]:
-            if (len(alt_after.get(enz, [])) == 0
-                    and len(before_sites.get(enz, [])) == len(alt_diff["lost"][enz])):
-                _consider({
-                    "source": "mutation", "enzyme": enz, "effect": "lost",
-                    "changes": changes, "aa_distance": 0, "new_codon": alt_codon,
-                    "silent_aa_index": None, "silent_original_codon": None,
-                    "silent_new_codon": None,
-                    "methylation": _methyl(alt_seq, "lost", enz, codon_abs),
+                    "methylation": _methyl(alt_seq, effect, enz, codon_abs),
+                    "site_unique": unique,
+                    "wt_site_count": len(before_sites.get(enz, [])),
+                    "wt_bands": predict_gel_bands(sequence, enz),
+                    "mut_bands": predict_gel_bands(alt_seq, enz),
                 })
 
     # Silent mutations within max_aa_distance AA of the mutation codon,
@@ -451,13 +461,18 @@ def list_diagnostic_choices(
             continue  # covered by the same-codon alternatives above
         enz = candidate["enzyme"]
         cand_seq = _silent_mutation_seq(mutated_seq, candidate["position"], candidate["new_codon"])
-        cand_count = len(count_sites(cand_seq, enz))
-        enz_before = len(after_sites.get(enz, []))
+        # Judge against WILD TYPE (not the intermediate the local search
+        # ran on), and accept an enzyme that cuts elsewhere when its band
+        # pattern reads cleanly — same rule the main search now uses.
+        wt_n = len(count_sites(sequence, enz))
+        final_n = len(count_sites(cand_seq, enz))
         if candidate["effect"] == "gained":
-            clean = enz_before == 0 and cand_count == len(candidate["site_positions"])
+            usable = final_n > wt_n and (wt_n == 0
+                     or gel_pattern_change(sequence, cand_seq, enz)["readable"])
         else:
-            clean = cand_count == 0 and enz_before == len(candidate["site_positions"])
-        if clean:
+            usable = final_n < wt_n and (final_n == 0
+                     or gel_pattern_change(sequence, cand_seq, enz)["readable"])
+        if usable:
             # Same check as design_mutation_primers: the silent change only
             # counts if it lands inside primer B/C's own synthesized span.
             mut_changed = [i for i in range(codon_abs, codon_abs + 3) if mutated_seq[i] != sequence[i]]
@@ -476,9 +491,17 @@ def list_diagnostic_choices(
                 "silent_original_codon": candidate["original_codon"],
                 "silent_new_codon": candidate["new_codon"],
                 "methylation": _methyl(cand_seq, candidate["effect"], enz, candidate["position"]),
+                "site_unique": wt_n == 0 if candidate["effect"] == "gained" else final_n == 0,
+                "wt_site_count": wt_n,
+                "wt_bands": predict_gel_bands(sequence, enz),
+                "mut_bands": predict_gel_bands(cand_seq, enz),
             })
 
-    return sorted(best.values(), key=lambda c: (c["aa_distance"], c["changes"], c["enzyme"]))
+    # Same priority the design itself uses: closest to the mutation, then
+    # fewest nucleotide changes; a site that cuts nowhere else only breaks
+    # ties between options that cost the same.
+    return sorted(best.values(), key=lambda c: (
+        c["aa_distance"], c["changes"], not c["site_unique"], c["enzyme"]))
 
 
 # ---------------------------------------------------------------------------
@@ -709,91 +732,103 @@ def design_mutation_primers(
         diagnostic: DiagnosticInfo | None = None
         working_seq = mutated_seq   # may be updated by silent mutation below
 
-        # A "gained"/"lost" enzyme is only a clean, useful diagnostic if it
-        # doesn't ALSO cut somewhere else unrelated to the mutation — otherwise
-        # a digest cuts either way and the presence/absence check verified in
-        # Part 6 is meaningless (e.g. an enzyme with 4 sites total, one of
-        # which happens to be destroyed by the mutation, still visibly cuts
-        # the construct 3 other times regardless of the mutation).
+        # Choosing the diagnostic enzyme. Priority, in the order the lab
+        # actually cares about:
+        #   1. fewest nucleotide changes   (shorter primers, cheaper, more
+        #      specific — so the mutation codon itself always beats adding a
+        #      silent mutation elsewhere)
+        #   2. closest to the mutation
+        #   3. a usable enzyme
+        # "Usable" does NOT mean the enzyme cuts nowhere else. An enzyme
+        # with existing sites is fine when the BAND PATTERN visibly changes
+        # — e.g. a 2482 bp band splitting into 1861 + 621 beside unchanged
+        # 4941 and 482 bands. Requiring a globally unique site instead
+        # pushed the search into needless silent mutations and longer
+        # primers. A unique site is still preferred among options that cost
+        # the same number of nucleotide changes, because it gives the
+        # simplest cut/no-cut readout.
         before_sites = scan_sites(sequence)
-        after_sites  = scan_sites(mutated_seq)
-        clean_gained = [
-            enz for enz in gained
-            if len(before_sites.get(enz, [])) == 0
-            and len(after_sites.get(enz, [])) == len(gained[enz])
-        ]
-        clean_lost = [
-            enz for enz in lost
-            if len(after_sites.get(enz, [])) == 0
-            and len(before_sites.get(enz, [])) == len(lost[enz])
-        ]
-
         pref = preferred_diagnostic_enzyme
-        if pref is not None:
-            clean_gained = [e for e in clean_gained if e == pref]
-            clean_lost = [e for e in clean_lost if e == pref]
 
-        if clean_gained:
-            enz = clean_gained[0]
+        def _pick_from_codon(cand_seq: str, cand_after: dict) -> tuple | None:
+            """
+            Best diagnostic obtainable from one candidate codon, or None.
+            Returns (enzyme, effect, unique, gel) — unique sites first, then
+            enzymes whose gel pattern is readable despite cutting elsewhere.
+            """
+            cand_diff = gained_lost_sites(sequence, cand_seq)
+            unique_hits, readable_hits = [], []
+            for effect, table in (("gained", cand_diff["gained"]),
+                                  ("lost", cand_diff["lost"])):
+                for enz in table:
+                    if pref is not None and enz != pref:
+                        continue
+                    if effect == "gained":
+                        is_unique = (len(before_sites.get(enz, [])) == 0
+                                     and len(cand_after.get(enz, [])) == len(table[enz]))
+                    else:
+                        is_unique = (len(cand_after.get(enz, [])) == 0
+                                     and len(before_sites.get(enz, [])) == len(table[enz]))
+                    if is_unique:
+                        unique_hits.append((enz, effect, True, None))
+                        continue
+                    gel = gel_pattern_change(sequence, cand_seq, enz)
+                    if gel["readable"]:
+                        readable_hits.append((enz, effect, False, gel))
+            for bucket in (unique_hits, readable_hits):
+                if bucket:
+                    bucket.sort(key=lambda h: h[0])   # deterministic
+                    return bucket[0]
+            return None
+
+        diagnostic: DiagnosticInfo | None = None
+        working_seq = mutated_seq   # may be updated by silent mutation below
+        after_sites = scan_sites(mutated_seq)
+
+        hit = _pick_from_codon(mutated_seq, after_sites)
+        if hit is not None:
+            enz, effect, uniq, gel = hit
             diagnostic = DiagnosticInfo(
-                enzyme=enz, effect="gained", source="mutation"
-            )
-        elif clean_lost:
-            enz = clean_lost[0]
-            diagnostic = DiagnosticInfo(
-                enzyme=enz, effect="lost", source="mutation"
+                enzyme=enz, effect=effect, source="mutation",
+                site_unique=uniq,
+                wt_site_count=len(before_sites.get(enz, [])),
             )
         elif not is_multi:
             # Protocol step 1a: "change the nucleotide again" — before
             # resorting to an adjacent-codon silent mutation, try OTHER
-            # codons that still encode the same target amino acid (there is
-            # often more than one, and the fewest-change pick above isn't
-            # necessarily the one that creates/destroys a usable site).
-            # Only attempted for a single mutation — combinatorially trying
-            # alternate codons at every position of a multi-mutation design
-            # isn't worth the complexity; multi-mutation designs fall
-            # straight through to the adjacent-codon silent search below.
+            # codons for the same amino acid, fewest changes first (that is
+            # the order ranked_codon_options returns). Only attempted for a
+            # single mutation — combinatorially trying alternate codons at
+            # every position of a multi-mutation design isn't worth the
+            # complexity; multi-mutation designs fall straight through to
+            # the adjacent-codon silent search below.
             for alt_codon in ranked_codon_options(orig_codon, new_aas[0]):
                 alt_seq, alt_changed_pos, _, _ = apply_codon(
                     sequence, orf_start, positions[0], alt_codon
                 )
-                alt_diff = gained_lost_sites(sequence, alt_seq)
                 alt_after = scan_sites(alt_seq)
-                alt_clean_gained = [
-                    enz for enz in alt_diff["gained"]
-                    if len(before_sites.get(enz, [])) == 0
-                    and len(alt_after.get(enz, [])) == len(alt_diff["gained"][enz])
-                ]
-                alt_clean_lost = [
-                    enz for enz in alt_diff["lost"]
-                    if len(alt_after.get(enz, [])) == 0
-                    and len(before_sites.get(enz, [])) == len(alt_diff["lost"][enz])
-                ]
-                if pref is not None:
-                    alt_clean_gained = [e for e in alt_clean_gained if e == pref]
-                    alt_clean_lost = [e for e in alt_clean_lost if e == pref]
-                if alt_clean_gained or alt_clean_lost:
-                    mutated_seq, changed_pos, new_codon = alt_seq, alt_changed_pos, alt_codon
-                    working_seq = mutated_seq
-                    after_sites = alt_after
-                    result.new_codon = new_codon
-                    result.new_codons = [new_codon]
-                    result.changed_positions = changed_pos
-                    result.mutation_nt_position = changed_pos[0] if changed_pos else codon_abs
-                    if alt_clean_gained:
-                        diagnostic = DiagnosticInfo(
-                            enzyme=alt_clean_gained[0], effect="gained", source="mutation"
-                        )
-                    else:
-                        diagnostic = DiagnosticInfo(
-                            enzyme=alt_clean_lost[0], effect="lost", source="mutation"
-                        )
-                    result.warnings.append(
-                        f"Used alternate codon {new_codon} for {new_aas[0]} (instead of "
-                        f"the fewest-change option) to obtain a clean diagnostic "
-                        f"site ({diagnostic.enzyme})."
-                    )
-                    break
+                alt_hit = _pick_from_codon(alt_seq, alt_after)
+                if alt_hit is None:
+                    continue
+                enz, effect, uniq, gel = alt_hit
+                mutated_seq, changed_pos, new_codon = alt_seq, alt_changed_pos, alt_codon
+                working_seq = mutated_seq
+                after_sites = alt_after
+                result.new_codon = new_codon
+                result.new_codons = [new_codon]
+                result.changed_positions = changed_pos
+                result.mutation_nt_position = changed_pos[0] if changed_pos else codon_abs
+                diagnostic = DiagnosticInfo(
+                    enzyme=enz, effect=effect, source="mutation",
+                    site_unique=uniq,
+                    wt_site_count=len(before_sites.get(enz, [])),
+                )
+                result.warnings.append(
+                    f"Used alternate codon {new_codon} for {new_aas[0]} (instead of "
+                    f"the fewest-change option) to obtain a diagnostic "
+                    f"site ({diagnostic.enzyme})."
+                )
+                break
 
         # ── Part 4 (moved earlier): preliminary B/C primer design ─────────────
         # Run now, on working_seq as of the direct-mutation/alt-codon step
@@ -829,25 +864,38 @@ def design_mutation_primers(
             span_start = min(codon_abs_list)
             span_end   = max(c + 3 for c in codon_abs_list)
 
-            def _clean_candidate(candidate: dict) -> bool:
-                # Same uniqueness concern as the direct-mutation diagnostic
-                # above: a candidate enzyme found via the local-window search
-                # could still have other pre-existing sites elsewhere in the
-                # full construct, making it a useless gained/lost signal on a
-                # real digest. Uses count_sites (single enzyme) rather than
-                # scan_sites (all ~50-80 enzymes) — this runs once per
-                # candidate at every widen step, so scanning the whole batch
-                # each time made widened searches extremely slow.
+            def _candidate_tier(candidate: dict) -> int | None:
+                """
+                Rank a silent-mutation candidate against WILD TYPE:
+                  0 = the enzyme cuts nowhere else (simple cut/no-cut readout)
+                  1 = it cuts elsewhere, but the band pattern reads cleanly
+                  2 = it cuts elsewhere and the pattern is hard to read
+                  None = no net change vs wild type, so useless as a diagnostic
+                The comparison must be against wild type, not the intermediate
+                mutated_seq the local search ran on: when the target mutation
+                itself created the site and the silent change then destroys
+                it, the finished construct matches wild type and the digest
+                shows nothing at all. Uses count_sites (single enzyme) rather
+                than scan_sites (all ~50-80 enzymes) because this runs once
+                per candidate at every widen step.
+                """
                 enz = candidate["enzyme"]
                 cand_seq = _silent_mutation_seq(
                     mutated_seq, candidate["position"], candidate["new_codon"]
                 )
-                cand_count = len(count_sites(cand_seq, enz))
-                enz_before = len(after_sites.get(enz, []))
+                wt_n = len(count_sites(sequence, enz))
+                final_n = len(count_sites(cand_seq, enz))
                 if candidate["effect"] == "gained":
-                    return enz_before == 0 and cand_count == len(candidate["site_positions"])
-                else:  # "lost"
-                    return cand_count == 0 and enz_before == len(candidate["site_positions"])
+                    if final_n <= wt_n:
+                        return None
+                    if wt_n == 0:
+                        return 0
+                else:
+                    if final_n >= wt_n:
+                        return None
+                    if final_n == 0:
+                        return 0
+                return 1 if gel_pattern_change(sequence, cand_seq, enz)["readable"] else 2
 
             clean_hits: list = []
             best_unclean_hit = None  # best-effort fallback if nothing clean turns up
@@ -864,15 +912,25 @@ def design_mutation_primers(
                 silent_hits = [h for h in silent_hits if h["aa_index"] not in positions]
                 if pref is not None:
                     silent_hits = [h for h in silent_hits if h["enzyme"] == pref]
-                # Closest codon to the mutation first, then fewest nt
-                # changes — a farther silent change lengthens primer B/C.
-                silent_hits.sort(key=lambda h: (
-                    min(abs(h["aa_index"] - p) for p in positions),
-                    h["changes"], h["enzyme"],
+                # Readable first, then closest codon to the mutation, then
+                # fewest nt changes — a farther silent change lengthens
+                # primer B/C.
+                scored = [(t, h) for t, h in
+                          ((_candidate_tier(h), h) for h in silent_hits)
+                          if t is not None]
+                # Closest codon first, then fewest nt changes — those are
+                # what shorten the primer, and matter more than whether the
+                # enzyme happens to cut nowhere else. Tier only breaks ties,
+                # so a unique site wins between otherwise equal options.
+                scored.sort(key=lambda th: (
+                    min(abs(th[1]["aa_index"] - p) for p in positions),
+                    th[1]["changes"], th[0], th[1]["enzyme"],
                 ))
-                if silent_hits and best_unclean_hit is None:
-                    best_unclean_hit = silent_hits[0]
-                clean_hits = [c for c in silent_hits if _clean_candidate(c)]
+                if best_unclean_hit is None:
+                    poor = [h for t, h in scored if t == 2]
+                    if poor:
+                        best_unclean_hit = poor[0]
+                clean_hits = [h for t, h in scored if t <= 1]
                 if clean_hits:
                     break
                 # Once the search window has been clamped all the way out to
@@ -903,6 +961,18 @@ def design_mutation_primers(
                     bc_final = design_bc_primers(candidate_seq, changed_pos, tm_range, min_overlap, original_seq=sequence)
                 except RuntimeError:
                     bc_final = None
+                # The silent search runs against mutated_seq (the target
+                # mutation already applied), so its "gained"/"lost" is
+                # relative to that intermediate — NOT to wild type. When the
+                # target mutation itself created the site and the silent
+                # change then destroys it (or vice versa), the finished
+                # construct ends up identical to wild type for this enzyme
+                # and the digest shows nothing. Compare against wild type.
+                wt_n = len(count_sites(sequence, cand["enzyme"]))
+                final_n = len(count_sites(candidate_seq, cand["enzyme"]))
+                net_ok = final_n > wt_n if cand["effect"] == "gained" else final_n < wt_n
+                if not net_ok:
+                    continue
                 silent_codon_start = orf_start + (cand["aa_index"] - 1) * 3
                 if bc_final is not None and bc_final.b_start <= silent_codon_start < bc_final.c_end:
                     hit = cand
@@ -919,6 +989,8 @@ def design_mutation_primers(
                     silent_original_codon=hit["original_codon"],
                     silent_new_codon=hit["new_codon"],
                     silent_changes=hit["changes"],
+                    site_unique=len(before_sites.get(hit["enzyme"], [])) == 0,
+                    wt_site_count=len(before_sites.get(hit["enzyme"], [])),
                 )
                 if searched_flank > silent_window_flank:
                     result.warnings.append(

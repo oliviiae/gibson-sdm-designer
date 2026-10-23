@@ -279,11 +279,20 @@ def verify_restriction_site(
     seq: str,
     enzyme_name: str,
     expected_present: bool,
+    compare_seq: str | None = None,
 ) -> RestrictionCheck:
     """
-    Check whether enzyme_name cuts seq at least once.
-    Returns a RestrictionCheck whose .passed is True when the observed
-    presence matches expected_present.
+    Check that the diagnostic enzyme behaves as designed.
+
+    With compare_seq (the wild-type counterpart of the same region), the
+    check compares CUT COUNTS rather than mere presence. That is what makes
+    a diagnostic enzyme that also cuts elsewhere verifiable at all: such an
+    enzyme is present in both wild type and mutant, so a presence/absence
+    test would pass trivially for a gained site and fail wrongly for a lost
+    one. What actually matters is that the mutant gains (or loses) a cut
+    relative to wild type — exactly what shows up as a changed band pattern.
+
+    Without compare_seq, falls back to the plain presence/absence test.
     """
     from Bio.Restriction import AllEnzymes
     seq = seq.upper()
@@ -305,6 +314,32 @@ def verify_restriction_site(
     analysis = Analysis(rb, Seq(seq), linear=True)
     cuts = analysis.full().get(enz, [])
     observed_present = len(cuts) > 0
+
+    if compare_seq is not None:
+        wt_cuts = Analysis(
+            RestrictionBatch([enz]), Seq(compare_seq.upper()), linear=True
+        ).full().get(enz, [])
+        n_mut, n_wt = len(cuts), len(wt_cuts)
+        if expected_present:
+            passed = n_mut > n_wt
+            verb = "gains" if passed else "does NOT gain"
+        else:
+            passed = n_mut < n_wt
+            verb = "loses" if passed else "does NOT lose"
+        return RestrictionCheck(
+            passed=passed,
+            enzyme=enzyme_name,
+            expected_present=expected_present,
+            observed_present=observed_present,
+            cut_positions=list(cuts),
+            message=(
+                f"{enzyme_name} cuts the product {n_mut}x vs {n_wt}x in wild "
+                f"type — the mutation {verb} a site"
+                + ("" if n_wt == 0 else " (this enzyme also cuts elsewhere, so "
+                                        "read the band pattern, not cut/no-cut)")
+            ),
+        )
+
     passed = observed_present == expected_present
 
     if passed:
@@ -412,7 +447,8 @@ def run_full_verification(
     rest_check: RestrictionCheck | None = None
     if diagnostic_enzyme:
         rest_check = verify_restriction_site(
-            assembled, diagnostic_enzyme, diagnostic_expected_present
+            assembled, diagnostic_enzyme, diagnostic_expected_present,
+            compare_seq=original_seq[top_a.primer_start:top_d.primer_end],
         )
 
     if mutation_label is None:

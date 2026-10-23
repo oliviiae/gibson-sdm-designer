@@ -24,10 +24,27 @@ from Bio.Seq import Seq
 # England Biolabs — Biopython's per-enzyme supplier_list() carries this
 # directly from REBASE, so it's checked against real catalog data rather
 # than a hand-maintained enzyme list.
+def _specified_bases(site: str) -> int:
+    """
+    Number of fixed (non-N) bases in a recognition site. For an interrupted
+    palindrome like BstXI's CCANNNNNNTGG the raw string is 12 characters but
+    only 6 bases are actually specified, so that is what determines how
+    often the enzyme cuts.
+    """
+    return sum(1 for c in site.upper() if c != "N")
+
+
 def _make_batch() -> RestrictionBatch:
     rb = RestrictionBatch(CommOnly)
+    # Size filter is about how specifically an enzyme cuts, so it counts
+    # SPECIFIED bases, not raw site length. Judging by raw length silently
+    # dropped 21 standard NEB enzymes whose sites contain an N spacer —
+    # BstXI, SfiI, DraIII, BglI, AlwNI, XmnI and friends. They are common
+    # in the lab and often give the cheapest diagnostic (no extra silent
+    # mutation needed), so excluding them forced longer, costlier designs.
     return RestrictionBatch(
-        [e for e in rb if 6 <= len(e.site) <= 8
+        [e for e in rb
+         if (6 <= len(e.site) <= 8 or 6 <= _specified_bases(e.site) <= 8)
          and "New England Biolabs" in e.supplier_list()]
     )
 
@@ -320,3 +337,80 @@ def methylation_overlaps(seq: str, enzyme_name: str, near_start: int, near_end: 
                 hits.append(label)
                 break
     return hits
+
+
+# Gel-readability thresholds. A diagnostic digest does not need an enzyme
+# that cuts nowhere else: an enzyme with existing sites is perfectly usable
+# as long as the BAND PATTERN visibly changes (e.g. a 2482 bp band splitting
+# into 1861 + 621 against unchanged 4941 and 482 bands). Insisting on a
+# globally unique site instead forces extra silent mutations and longer
+# primers, which is worse.
+_MIN_VISIBLE_BAND = 150     # bp; smaller fragments run off / are too faint
+_MIN_BAND_SEPARATION = 0.10  # two bands within 10% co-migrate as one
+_MAX_READABLE_BANDS = 12     # beyond this a digest is a smear
+
+
+def _comigrates(band: int, lane: list[int]) -> bool:
+    """True if another band in the same lane runs too close to this one."""
+    near = sum(1 for other in lane
+               if abs(other - band) <= _MIN_BAND_SEPARATION * max(other, band))
+    return near > 1   # itself, plus at least one other
+
+
+def gel_pattern_change(
+    wt_seq: str,
+    mut_seq: str,
+    enzyme_name: str,
+    circular: bool = True,
+) -> dict:
+    """
+    Compare the predicted digest of wild type vs mutant for one enzyme and
+    judge whether the difference is actually readable on a gel.
+
+    Returns a dict with:
+      wt_bands, mut_bands : predicted fragment sizes (bp, largest first)
+      lost_bands          : bands present in WT but not the mutant
+      gained_bands        : bands present in the mutant but not WT
+      readable            : True if the change would be unambiguous on a gel
+      reason              : short explanation (why not, when readable is False)
+
+    "Readable" requires every band that appears or disappears to be big
+    enough to see, to not co-migrate with another band in its own lane, and
+    the digest not to have so many fragments that it smears.
+    """
+    from collections import Counter
+
+    wt = predict_gel_bands(wt_seq, enzyme_name, circular)
+    mut = predict_gel_bands(mut_seq, enzyme_name, circular)
+    info = {"wt_bands": wt, "mut_bands": mut, "lost_bands": [],
+            "gained_bands": [], "readable": False, "reason": ""}
+    if not wt or not mut:
+        info["reason"] = "enzyme not recognized"
+        return info
+
+    cw, cm = Counter(wt), Counter(mut)
+    lost = sorted((cw - cm).elements(), reverse=True)
+    gained = sorted((cm - cw).elements(), reverse=True)
+    info["lost_bands"], info["gained_bands"] = lost, gained
+
+    if not lost and not gained:
+        info["reason"] = "digest pattern is identical — nothing to see"
+        return info
+    if max(len(wt), len(mut)) > _MAX_READABLE_BANDS:
+        info["reason"] = f"too many fragments ({max(len(wt), len(mut))}) to read"
+        return info
+    small = [b for b in lost + gained if b < _MIN_VISIBLE_BAND]
+    if small:
+        info["reason"] = f"changed fragment {min(small)} bp is too small to see"
+        return info
+    for band in gained:
+        if _comigrates(band, mut):
+            info["reason"] = f"new {band} bp band co-migrates with another band"
+            return info
+    for band in lost:
+        if _comigrates(band, wt):
+            info["reason"] = f"the {band} bp band that disappears co-migrates with another"
+            return info
+
+    info["readable"] = True
+    return info

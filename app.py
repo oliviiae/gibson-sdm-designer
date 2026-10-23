@@ -747,7 +747,12 @@ def _render_result(result, key_prefix=""):
         src = "from mutation" if d.source == "mutation" else \
               (f"silent mutation at aa{d.silent_aa_index}, "
                f"{d.silent_original_codon}→{d.silent_new_codon}")
-        kv.append(("Diagnostic site", f"{d.enzyme} — {d.effect} ({src})"))
+        note = ""
+        if not getattr(d, "site_unique", True):
+            n = getattr(d, "wt_site_count", 0)
+            note = (f" · also cuts wild type {n}×, so read the band pattern "
+                    f"below rather than cut/no-cut")
+        kv.append(("Diagnostic site", f"{d.enzyme} — {d.effect} ({src}){note}"))
     else:
         kv.append(("Diagnostic site", "none found"))
     rows_html = "".join(
@@ -1031,6 +1036,10 @@ if mode == "Design a mutation":
                             auto_result.mutated_sequence if d.effect == "gained" else req["sequence"],
                             auto_enz, auto_result.mutation_nt_position - 40,
                             auto_result.mutation_nt_position + 40),
+                        "site_unique": getattr(d, "site_unique", True),
+                        "wt_site_count": getattr(d, "wt_site_count", 0),
+                        "wt_bands": auto_result.wt_gel_bands,
+                        "mut_bands": auto_result.mutant_gel_bands,
                     }]
                 choices = first + [c for c in choices if c["enzyme"] != auto_enz]
             st.session_state["dm_choices"] = choices
@@ -1061,6 +1070,13 @@ if mode == "Design a mutation":
                     ],
                     "AA from mutation": [c["aa_distance"] for c in choices],
                     "nt changes": [c["changes"] for c in choices],
+                    "Digest": [
+                        (f"{len(c['wt_bands'])}→{len(c['mut_bands'])} bands"
+                         + ("" if c["site_unique"]
+                            else f", also cuts WT {c['wt_site_count']}×"))
+                        if c.get("wt_bands") else "—"
+                        for c in choices
+                    ],
                     "Dam/Dcm overlap": [", ".join(c["methylation"]) or "—" for c in choices],
                     "NEB catalog": [_neb_tag(c["enzyme"]) for c in choices],
                 },

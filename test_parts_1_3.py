@@ -213,6 +213,44 @@ def test_part3_silent_sites():
 
 # ---------------------------------------------------------------------------
 
+def test_interrupted_palindrome_enzymes_available():
+    """
+    Enzymes whose recognition site contains an N spacer (BstXI
+    CCANNNNNNTGG, SfiI, DraIII, BglI, ...) are standard in the lab. A size
+    filter on the RAW site string dropped all of them, so the designer
+    could never offer them and spent extra silent mutations instead.
+    """
+    from restriction_utils import _BATCH
+    names = {str(e) for e in _BATCH}
+    for enz in ("BstXI", "SfiI", "DraIII", "BglI", "AlwNI", "XmnI"):
+        assert enz in names, f"{enz} missing from the enzyme batch"
+    print(f"  {len(names)} enzymes available, N-spacer sites included  PASS")
+
+
+def test_mutation_codon_preferred_over_silent():
+    """
+    Least nucleotide change wins: if the mutation codon alone yields a
+    usable diagnostic, the design must not add a silent mutation.
+    """
+    from pipeline import design_mutation_primers
+    from restriction_utils import count_sites
+    seq = TEST_SEQ
+    r = design_mutation_primers(
+        sequence=seq, target_position=15, original_aa="K", new_aa="E",
+        orf_start=_ORF_START,
+    )
+    assert not r.errors, r.errors
+    if r.diagnostic is not None:
+        changed = [i for i in range(len(seq)) if seq[i] != r.mutated_sequence[i]]
+        codons_touched = {i // 3 for i in changed}
+        if r.diagnostic.source == "mutation":
+            assert len(codons_touched) == 1, (
+                f"diagnostic came from the mutation codon, but {len(codons_touched)} "
+                f"codons were changed: {changed}"
+            )
+    print("  K15E: no silent mutation added when the codon alone suffices  PASS")
+
+
 if __name__ == "__main__":
     print(f"Test sequence ({len(TEST_SEQ)} bp):")
     print(f"  {TEST_SEQ}")
@@ -227,4 +265,6 @@ if __name__ == "__main__":
     test_part3_gained_lost()
     test_part3_silent_sites()
 
+    test_interrupted_palindrome_enzymes_available()
+    test_mutation_codon_preferred_over_silent()
     print("\nAll tests passed.")
